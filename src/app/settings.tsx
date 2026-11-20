@@ -1,7 +1,9 @@
 import { useState, type ReactNode } from 'react';
 import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
-import { SEALS } from '../game/core/pyramids';
+import { router } from 'expo-router';
+
+import { campFloorNumbers, PYRAMIDS, SEALS } from '../game/core/pyramids';
 import { sealsFilled, useProgress } from '../state/progress';
 import { useSettings, type Controls, type MotionSetting } from '../state/settings';
 import { Button } from '../ui/Button';
@@ -64,6 +66,20 @@ export default function SettingsScreen() {
             <View style={styles.devRow}>
               {Array.from({ length: SEALS.length + 1 }, (_, n) => (
                 <Button key={n} label={`${n}`} style={styles.devButton} onPress={() => useProgress.getState().devGrantArtifacts(n)} />
+              ))}
+            </View>
+            <Text style={type.caption}>Start Egypt at a camp (saves the camp, then opens the pyramid):</Text>
+            <View style={styles.devRow}>
+              {campFloorNumbers(PYRAMIDS.egypt).map((floor) => (
+                <Button
+                  key={floor}
+                  label={`Egypt: camp at floor ${floor}`}
+                  style={styles.devButton}
+                  onPress={() => {
+                    useProgress.getState().devReachCamp('egypt', floor - 1);
+                    router.push({ pathname: '/pyramid/[id]', params: { id: 'egypt' } });
+                  }}
+                />
               ))}
             </View>
           </Section>

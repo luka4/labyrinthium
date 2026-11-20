@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
-import { SEALS, type PyramidId } from '../game/core/pyramids';
+import { PYRAMIDS, SEALS, isPyramidId, type PyramidId } from '../game/core/pyramids';
 
 /**
  * Saved progress through the world. A descent between camps is never saved:
@@ -27,6 +27,8 @@ type ProgressActions = {
   startDescent: (id: PyramidId) => void;
   reachFloor: (id: PyramidId, floorIndex: number) => void;
   reachCamp: (id: PyramidId, floorIndex: number) => void;
+  /** development only: pretend a camp floor was reached (floors and camps changed in version 2) */
+  devReachCamp: (id: PyramidId, floorIndex: number) => void;
   takeArtifact: (id: PyramidId) => void;
   markBlackUnlockSeen: () => void;
   markEndingSeen: () => void;
@@ -52,6 +54,11 @@ export const useProgress = create<ProgressData & ProgressActions>()(
       reachFloor: (id, floorIndex) =>
         set((s) => (floorIndex > (s.deepest[id] ?? -1) ? { deepest: { ...s.deepest, [id]: floorIndex } } : s)),
       reachCamp: (id, floorIndex) => set((s) => ({ camp: { ...s.camp, [id]: floorIndex } })),
+      devReachCamp: (id, floorIndex) =>
+        set((s) => ({
+          camp: { ...s.camp, [id]: floorIndex },
+          deepest: { ...s.deepest, [id]: Math.max(floorIndex, s.deepest[id] ?? 0) },
+        })),
       takeArtifact: (id) =>
         set((s) => {
           const camp = { ...s.camp };
@@ -74,7 +81,23 @@ export const useProgress = create<ProgressData & ProgressActions>()(
     }),
     {
       name: 'labyrinthium.progress',
-      version: 1,
+      version: 2,
+      /**
+       * v2: Egypt has 10 floors and camps follow the floor number (every 5th), so saved camp
+       * indices no longer match: camps reset (artifacts and records stay), `deepest` is clamped.
+       */
+      migrate: (persisted, version) => {
+        const data = (persisted ?? {}) as Partial<ProgressData>;
+        if (version < 2) {
+          data.camp = {};
+          const deepest: ProgressData['deepest'] = {};
+          for (const [id, floor] of Object.entries(data.deepest ?? {})) {
+            if (isPyramidId(id) && typeof floor === 'number') deepest[id] = Math.min(floor, PYRAMIDS[id].floorCount - 1);
+          }
+          data.deepest = deepest;
+        }
+        return { ...EMPTY, ...data };
+      },
       storage: createJSONStorage(() => AsyncStorage),
       partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen }) => ({
         artifacts,

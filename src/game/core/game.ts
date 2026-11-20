@@ -1,4 +1,6 @@
-import { DIRS, floorCells, generateFloor, type Floor } from './floor';
+import type { ArchProfileId } from './architecture';
+import { DIRS, floorSeed, type Floor } from './floor';
+import { floorFor } from './generate';
 import { computeLight, torchRadius } from './vision';
 
 /**
@@ -17,10 +19,9 @@ export type Pyramid = {
   id: string;
   seed: number;
   floorCount: number;
-  /** cells per side on the top floor and in the basement */
-  firstCells: number;
-  lastCells: number;
-  /** a camp every N floors (floor index N, 2N, ...); 0 = no camps */
+  /** which architecture profile builds its floors */
+  architecture: ArchProfileId;
+  /** a camp on every floor whose 1-based number is divisible by N (the basement may be one); 0 = no camps */
   campEvery: number;
 };
 
@@ -52,19 +53,17 @@ export type Action =
   | { type: 'continue' }
   | { type: 'retry' };
 
-export function floorSeed(pyramid: Pyramid, floorIndex: number): number {
-  return (pyramid.seed * 7919 + floorIndex * 104729) | 0;
-}
+export { floorSeed };
 
-/** Camps save progress and refill the torch. The top floor is the entrance, not a camp. */
+/** Camps save progress and refill the torch: every floor whose 1-based number divides by `campEvery`. */
 export function isCampFloor(pyramid: Pyramid, floorIndex: number): boolean {
-  return pyramid.campEvery > 0 && floorIndex > 0 && floorIndex % pyramid.campEvery === 0;
+  return pyramid.campEvery > 0 && floorIndex > 0 && (floorIndex + 1) % pyramid.campEvery === 0;
 }
 
-/** The floor a burnt-out torch sends you back to: the last camp, or the top floor. */
+/** The floor a burnt-out torch sends you back to: the last camp at or above this floor, or the top floor. */
 export function lastCamp(pyramid: Pyramid, floorIndex: number): number {
-  if (pyramid.campEvery <= 0) return 0;
-  return floorIndex - (floorIndex % pyramid.campEvery);
+  for (let i = floorIndex; i > 0; i--) if (isCampFloor(pyramid, i)) return i;
+  return 0;
 }
 
 export function isBasement(pyramid: Pyramid, floorIndex: number): boolean {
@@ -72,11 +71,7 @@ export function isBasement(pyramid: Pyramid, floorIndex: number): boolean {
 }
 
 export function startFloor(pyramid: Pyramid, floorIndex: number, fuel = 1, steps = 0): GameState {
-  const floor = generateFloor({
-    cells: floorCells(floorIndex, pyramid.floorCount, pyramid.firstCells, pyramid.lastCells),
-    seed: floorSeed(pyramid, floorIndex),
-    loopRate: pyramid.floorCount <= 1 ? 0 : 0.05 * (floorIndex / (pyramid.floorCount - 1)),
-  });
+  const floor = floorFor(pyramid, floorIndex);
   const tiles = floor.size * floor.size;
   const state: GameState = {
     pyramid,
@@ -108,12 +103,12 @@ export function step(s: GameState, action: Action): GameState {
   switch (action.type) {
     case 'move': {
       if (s.status !== 'playing') return s;
-      const { size, walls } = s.floor;
+      const { size, solid } = s.floor;
       const [dx, dy] = DIRS[action.dir];
       const x = (s.pos % size) + dx;
       const y = Math.floor(s.pos / size) + dy;
       const next = y * size + x;
-      if (x < 0 || y < 0 || x >= size || y >= size || walls[next]) return s;
+      if (x < 0 || y < 0 || x >= size || y >= size || solid[next]) return s;
       s.pos = next;
       s.steps++;
       s.burning = true;
