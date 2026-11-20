@@ -6,7 +6,7 @@ Read `AGENTS.md` first (Expo's own agent notes: fetch versioned docs, never trus
 
 **Labyrinthium** (working title): a mobile labyrinth game. You wake at the top of a pyramid and descend floor by floor, by torchlight, to its basement, where a sacred artifact is kept. Four pyramids (Egypt, Maya, Cambodia, China) in any order; their four artifacts open the Black Pyramid; under it, the optional endless Drowned City.
 
-Design doc (the source of truth for game design): https://claude.ai/artifact/GJv23F6drqxG6GQt6fpSD9
+Design doc (an entry point only, not binding; the end result must be far more realistic and better looking than it describes): https://claude.ai/artifact/GJv23F6drqxG6GQt6fpSD9. The working roadmap and decisions are in `plans/`.
 
 Status: prototype with the full screen journey (all pyramids 5 floors). Next step is the one-day performance test on a budget Android phone (Redmi 9) with a release APK: Skia torch shader + 500 particles, a react-three-fiber pyramid transition, one Rive animation.
 
