@@ -167,3 +167,48 @@ Each answer: picked option and a one-line reason. Implementation agents append b
 - A. Allow floats. B. Integer math + mulberry32 only in generation.
 
 **Picked: B.** Bit-identical floors across Hermes, V8 and a future server.
+
+## Implementation decisions
+
+Each: options and the pick.
+
+### I1. Where `floorFor` lives
+- A. In `floor.ts` (plan). B. In `generate.ts`, `floorSeed` moved into `floor.ts`.
+**Picked: B.** `floor.ts` holds the types and flag tables that `generate.ts` imports at module load; importing `generate` back from `floor.ts` is a runtime cycle (TDZ on `TILE_SOLID`). `game.ts` re-exports `floorSeed`.
+
+### I2. Stairs site and loops (check "stairs dist >= 0.6 x max dist")
+- A. Pick the stairs site on the spanning tree before loops (plan). B. Also re-pick after loops as the farthest leaf of the final graph, ban tree leaves from halls/galleries, and accept a loop only if the farthest dead end stays within 80 % of the farthest site.
+**Picked: B.** With A, loops and merged leaves made some middle-of-the-labyrinth tile much farther than the stairs (41 failures over seeds 1..300). B passes all 300 seeds x 10 floors. The pre-loop candidate (and its neighbours) is still excluded from merges and loops, so the final choice may be that candidate.
+
+### I3. Niche eligibility
+- A. "3x3 around the niche except the passage tile is ROCK" (plan; impossible for a straight passage, the two diagonal tiles are passage). B. The niche and the five tiles around it on the far side must be rock.
+**Picked: B.**
+
+### I4. Hooks run before the masks are derived
+- A. After everything (plan step 12). B. After niches, before `solid`/`opaque`/BFS/spots/oil.
+**Picked: B.** A hook that adds tiles (traps, water, plates) then gets correct masks and its spots/tiles are seen by oil placement; connectivity is verified by the same check script.
+
+### I5. `Floor.loops`
+Added the number of loop edges to `Floor` (the check script needs it; also useful for the debugging dump).
+
+### I6. Stairs-up flight placement
+Plan: on the side farthest from the ports. Pick: a side with no door if there is one, else any side; the two flight tiles never sit on a tile where a door enters the room (arrival rooms with 4 doors stay connected).
+
+### I7. Burial artifact tile
+The sarcophagus fills the two far tiles on the door's axis; the artifact (`stairs`) sits 3 tiles from the far wall on that axis (the open tile right inside the door in a 3-deep chamber).
+
+### I8. Render details decided while baking
+- Wall tops: only rock tiles with an open 4-neighbour get a cap (diagonal-only tiles stay dark rock); with 8-neighbours the caps made walls read as floor. Cap and face are pale limestone, paving is warmer and darker so walls and floors separate even in dim light.
+- Light mask is built for the whole floor (86 x 86 px at floor 10) and drawn clipped by the board; no per-frame mask windowing.
+- The mask ring keeps 4 images (not 2) before `dispose()`, because the recorded picture of the previous frame may still draw. The baked art is disposed when the next floor's art replaces it; nothing is disposed on unmount (the GC frees it; avoids a StrictMode double-effect disposing a live image).
+- Camp brazier: drawn on the first open tile beside the arrival landing, inside the lit layer.
+- Egypt hall paving is laid in 2x2 slabs, galleries in 1-tile slabs, granite rooms in 1.5-tile slabs, a running bond elsewhere; painted friezes (lapis + gold) on the wall faces of burial, antechamber, shrine and stairwell rooms.
+
+### I9. Dev shortcut
+"Egypt: camp at floor 5 / 10" buttons call `devReachCamp` (sets the camp and deepest floor) and open the Egypt page, where "Continue from camp" starts the floor.
+
+### I10. tsconfig
+`scripts/` is excluded from `tsc --noEmit` (it uses Node built-ins and runs through `tsx`).
+
+### I11. Headless render check
+`bakeFloor` and `drawGame` were rendered to PNG in Node with canvaskit-wasm behind the RN-Skia web bindings (throwaway harness, not committed) to look at the result; on-device look and speed are unverified.

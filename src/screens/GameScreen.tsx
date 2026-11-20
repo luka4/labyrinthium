@@ -7,6 +7,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  PixelRatio,
   View,
   useWindowDimensions,
   type GestureResponderEvent,
@@ -16,6 +17,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { TORCH_SECONDS, isCampFloor, lastCamp, startFloor, step, type Direction, type GameState } from '../game/core/game';
 import type { PyramidInfo } from '../game/core/pyramids';
 import { drawGame } from '../game/render/drawGame';
+import { bakeFloor, bakeTilePx } from '../game/render/floorArt';
+import { createLightMask } from '../game/render/lightMask';
+import { themeFor } from '../game/render/themes';
 import { useProgress } from '../state/progress';
 import { useReducedMotion, useSettings } from '../state/settings';
 import { Button, IconButton } from '../ui/Button';
@@ -26,6 +30,8 @@ import { FloorOverview, type OverviewKind } from './play/FloorOverview';
 
 /** Redraws per second while nothing moves (torch burn and flicker). */
 const IDLE_FPS = 20;
+/** Tiles across the board; the camera follows the player on larger floors. */
+const VIEW_TILES = 15;
 const SWIPE_MIN_PX = 18;
 
 const DIR: Record<'right' | 'left' | 'down' | 'up', Direction> = { right: 0, left: 1, down: 2, up: 3 };
@@ -65,6 +71,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
   const flicker = useRef(1);
+  const cam = useRef({ x: 0, y: 0, floor: null as unknown });
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const leaving = useRef(false);
 
@@ -84,7 +91,19 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
         game.current = step(game.current, { type: 'tick', seconds: dt });
         flicker.current = 0.92 + 0.08 * Math.sin(t / 90) + 0.04 * Math.sin(t / 37);
         sinceDraw += dt;
-        if (sinceDraw >= 1 / IDLE_FPS) {
+        // the camera eases towards the player; redraw every frame while it moves
+        const g = game.current;
+        const tx = (g.pos % g.floor.size) + 0.5;
+        const ty = Math.floor(g.pos / g.floor.size) + 0.5;
+        const view = Math.min(g.floor.size, VIEW_TILES);
+        const lo = view / 2;
+        const hi = g.floor.size - view / 2;
+        const k = 1 - Math.pow(0.0001, dt);
+        const c = cam.current;
+        c.x += (Math.min(hi, Math.max(lo, tx)) - c.x) * k;
+        c.y += (Math.min(hi, Math.max(lo, ty)) - c.y) * k;
+        const moving = Math.abs(c.x - Math.min(hi, Math.max(lo, tx))) > 0.01 || Math.abs(c.y - Math.min(hi, Math.max(lo, ty))) > 0.01;
+        if (moving || sinceDraw >= 1 / IDLE_FPS) {
           sinceDraw = 0;
           setFrame((f) => f + 1);
         }
@@ -183,11 +202,39 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     router.dismissTo('/map');
   };
 
-  const tile = boardSize / s.floor.size;
+  const viewTiles = Math.min(s.floor.size, VIEW_TILES);
+  const tilePx = boardSize / viewTiles;
+  const info = pyramid.color;
+  // the architecture is baked once per floor, hidden under the overview
+  const art = useMemo(
+    () => bakeFloor(s.floor, themeFor(pyramid.id, info), bakeTilePx(s.floor.size, tilePx, PixelRatio.get())),
+    [s.floor, tilePx, pyramid.id, info],
+  );
+  const mask = useMemo(() => createLightMask(s.floor.size), [s.floor.size]);
+  // free the previous floor's image once the new one is in place (the GC frees the rest)
+  const prevArt = useRef<typeof art>(null);
+  useEffect(() => {
+    const old = prevArt.current;
+    prevArt.current = art;
+    if (old && old !== art) old.dispose();
+  }, [art]);
+  // snap the camera onto a new floor
+  if (cam.current.floor !== s.floor) {
+    const half = viewTiles / 2;
+    cam.current = {
+      x: Math.min(s.floor.size - half, Math.max(half, (s.pos % s.floor.size) + 0.5)),
+      y: Math.min(s.floor.size - half, Math.max(half, Math.floor(s.pos / s.floor.size) + 0.5)),
+      floor: s.floor,
+    };
+  }
   const picture = useMemo(
-    () => createPicture((canvas) => drawGame(canvas, s, tile, flicker.current), { width: boardSize, height: boardSize }),
+    () =>
+      createPicture((canvas) => drawGame(canvas, s, art, mask, { camX: cam.current.x, camY: cam.current.y, board: boardSize, tilePx }, flicker.current), {
+        width: boardSize,
+        height: boardSize,
+      }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [frame, s, tile, boardSize],
+    [frame, s, art, mask, tilePx, boardSize],
   );
 
   const checkpoint = lastCamp(pyramid, s.floorIndex);

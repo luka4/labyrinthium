@@ -31,6 +31,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.3.0",
+    "tsx": "^4.23.15",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -38,7 +39,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:floors": "tsx scripts/check-floors.ts"
   },
   "private": true
 }

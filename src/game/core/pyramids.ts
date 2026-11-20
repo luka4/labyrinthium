@@ -24,7 +24,7 @@ export type PyramidInfo = Pyramid & {
 /** The four pyramids whose artifacts fill the seals of the Black Pyramid's door, in door order. */
 export const SEALS: readonly PyramidId[] = ['egypt', 'maya', 'cambodia', 'china'];
 
-const BASE = { floorCount: 5, firstCells: 5, lastCells: 15, campEvery: 2, requires: [] } as const;
+const BASE = { floorCount: 5, architecture: 'generic', campEvery: 5, requires: [] } as const;
 
 export const PYRAMIDS: Record<PyramidId, PyramidInfo> = {
   egypt: {
@@ -36,6 +36,8 @@ export const PYRAMIDS: Record<PyramidId, PyramidInfo> = {
     power: 'Briefly points the way to the stairs. Strongest in Cambodia.',
     color: '#d6b066',
     top: 'capstone',
+    floorCount: 10,
+    architecture: 'egypt',
   },
   maya: {
     ...BASE,
@@ -71,8 +73,7 @@ export const PYRAMIDS: Record<PyramidId, PyramidInfo> = {
     ...BASE,
     id: 'black',
     seed: 5,
-    firstCells: 7,
-    lastCells: 17,
+    architecture: 'black',
     name: 'The Black Pyramid',
     artifact: "Builder's Heart",
     power: 'The end of the story, and a crack in the basement floor.',
@@ -90,6 +91,6 @@ export function isPyramidId(id: unknown): id is PyramidId {
 export function campFloorNumbers(p: Pyramid): number[] {
   const out: number[] = [];
   if (p.campEvery <= 0) return out;
-  for (let i = p.campEvery; i < p.floorCount; i += p.campEvery) out.push(i + 1);
+  for (let n = p.campEvery; n <= p.floorCount; n += p.campEvery) out.push(n);
   return out;
 }
