@@ -1,11 +1,11 @@
-import type { Floor } from './floor';
+import type { Grid } from './floor';
 
 /**
  * True when a straight line between two tile centers is not blocked by an opaque
  * tile (rock, pillar) and never squeezes diagonally between two such corners.
  */
-export function clearLine(floor: Floor, x0: number, y0: number, x1: number, y1: number): boolean {
-  const { opaque, size } = floor;
+export function clearLine(grid: Pick<Grid, 'size' | 'opaque'>, x0: number, y0: number, x1: number, y1: number): boolean {
+  const { opaque, size } = grid;
   const dx = x1 - x0;
   const dy = y1 - y0;
   const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) * 6));
@@ -29,8 +29,8 @@ export function clearLine(floor: Floor, x0: number, y0: number, x1: number, y1: 
  * quantised by the caller), so engines cannot disagree; only the brightness uses Math.pow.
  * `accumulate` keeps what `out` already holds and takes the maximum.
  */
-export function computeLight(floor: Floor, origin: number, radius: number, falloff: number, out: Float32Array, accumulate = false): Float32Array {
-  const { opaque, size } = floor;
+export function computeLight(grid: Pick<Grid, 'size' | 'opaque'>, origin: number, radius: number, falloff: number, out: Float32Array, accumulate = false): Float32Array {
+  const { opaque, size } = grid;
   if (!accumulate) out.fill(0);
   if (radius <= 0) return out;
   const px = origin % size;
@@ -43,7 +43,7 @@ export function computeLight(floor: Floor, origin: number, radius: number, fallo
       if (opaque[i]) continue;
       const d2 = (x - px) * (x - px) + (y - py) * (y - py);
       if (d2 > limit) continue;
-      if (!clearLine(floor, px, py, x, y)) continue;
+      if (!clearLine(grid, px, py, x, y)) continue;
       const v = Math.max(0, 1 - Math.pow(Math.sqrt(d2 / limit), falloff));
       if (v > out[i]) out[i] = v;
     }

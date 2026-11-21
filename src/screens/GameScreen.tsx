@@ -14,13 +14,14 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { isCampFloor, lastCamp, startFloor, step, type Direction, type GameEvent, type GameState } from '../game/core/game';
+import type { TrapKind } from '../game/core/floor';
 import { KIND_NAME, STEP_SECONDS } from '../game/core/lights';
 import type { PyramidInfo } from '../game/core/pyramids';
 import { STRIP_H } from '../game/render/drawLightHud';
-import { bakeFloor, bakeTilePx } from '../game/render/floorArt';
+import { createFloorArt, type FloorArt } from '../game/render/floorArt';
 import { createLightMask } from '../game/render/lightMask';
 import { themeFor } from '../game/render/themes';
-import { useProgress } from '../state/progress';
+import { useProgress, type HintId } from '../state/progress';
 import { useReducedMotion, useSettings } from '../state/settings';
 import { Button, IconButton } from '../ui/Button';
 import { haptic } from '../ui/haptics';
@@ -43,6 +44,23 @@ const SWIPE_TRAIL = 36;
 const FLICK_SPEED = 0.9;
 const FLICK_TRAVEL = 48;
 const CAPTION_SECONDS = 1.6;
+/** The trapdoor slab tilts open for this long before the next floor starts. */
+const FALL_SECONDS = 0.25;
+/** Seconds a first-encounter hint stays up. */
+const HINT_SECONDS = 3;
+/** Floor-art chunk budgets: ms of rasterising per frame while walking, and under the overview. */
+const ART_BUDGET_PLAYING = 6;
+const ART_BUDGET_OVERVIEW = 8;
+
+/** One-time teaching captions: what a trap looks like, shown the first time it is lit (plan 03). */
+const HINTS: Record<HintId, string> = {
+  plate: 'A granite slab set in the limestone. A pressure plate.',
+  block: 'Chips of fallen stone around it.',
+  portcullis: 'A slab hangs in the slots above the passage.',
+  sandfall: 'Sand trickles from the ceiling here.',
+  trapdoor: 'A slab on pivots. It would drop you to the floor below.',
+  collapse: 'The ceiling over the stairs gives way. Get away from the sand.',
+};
 
 const DIR: Record<'right' | 'left' | 'down' | 'up', Direction> = { right: 0, left: 1, down: 2, up: 3 };
 
@@ -55,7 +73,8 @@ type Phase =
   | { name: 'playing' }
   | { name: 'camp' }
   | { name: 'paused' }
-  | { name: 'burntOut' };
+  | { name: 'burntOut' }
+  | { name: 'buried' };
 
 const campLabel = (floorIndex: number) => (floorIndex === 0 ? 'the top' : `camp · floor ${floorIndex + 1}`);
 
@@ -79,6 +98,10 @@ function captionFor(e: GameEvent): string | null {
       return `Spare lit: ${name}`;
     case 'lowLight':
       return 'Light running low';
+    case 'plate':
+      return 'Click.';
+    case 'hit':
+      return 'The stone knocks the light from your hand';
     default:
       return null;
   }
@@ -122,6 +145,9 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const leaving = useRef(false);
   const walker = useMemo(() => createWalker(() => haptic.bump()), []);
   const drawRef = useRef<((time: number) => void) | null>(null);
+  const artRef = useRef<FloorArt | null>(null);
+  /** the first sightings captioned so far on this floor; the plate hint comes before the kind hint */
+  const hintSeen = useRef<Set<string>>(new Set());
   const clock = useRef(0);
   const caption = useRef<{ id: number; text: string; until: number } | null>(null);
   const [hud, setHud] = useState<HudText>(() => hudOf(game.current, null));
@@ -131,6 +157,33 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   useEffect(() => {
     reachFloor(pyramid.id, fromFloor);
   }, [pyramid.id, fromFloor, reachFloor]);
+
+  /** a hint caption: once per save per kind (`progress.hints`), up for HINT_SECONDS */
+  const showHint = useCallback((id: HintId, captionId: number) => {
+    if (useProgress.getState().hints[id]) return false;
+    caption.current = { id: captionId, text: HINTS[id], until: clock.current + HINT_SECONDS };
+    useProgress.getState().markHint(id);
+    hudDirty.current = true;
+    return true;
+  }, []);
+
+  /** the first time a trap of a new kind is lit: the plate hint first, the kind hint on the next sighting */
+  const checkHints = useCallback(
+    (g: GameState) => {
+      if (caption.current && caption.current.until > clock.current) return;
+      const { traps, size } = g.floor;
+      for (let k = 0; k < traps.length; k++) {
+        const t = traps[k];
+        if (g.trapPhase[k] !== 0 || g.light[t.tile] < 0.3) continue;
+        const kind: TrapKind = t.kind;
+        const hints = useProgress.getState().hints;
+        const id: HintId = !hints.plate && kind !== 'trapdoor' ? 'plate' : kind;
+        if (hints[id]) continue;
+        if (showHint(id, g.floorIndex * 1000 + 500 + k + size)) return;
+      }
+    },
+    [showHint],
+  );
 
   // game clock: the light burns by time, not by steps, and only while playing
   useEffect(() => {
@@ -144,6 +197,13 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     const loop = (t: number) => {
       const dt = last === null ? 0 : Math.min(0.1, (t - last) / 1000);
       last = t;
+      if (phaseRef.current.name === 'overview') {
+        // the overview is JS-animated, so leave it frame time: warm the chunks around the start tile
+        const g = game.current;
+        const x = g.pos % g.floor.size;
+        const y = Math.floor(g.pos / g.floor.size);
+        artRef.current?.ensure({ x0: x - VIEW_TILES / 2 - 1, y0: y - VIEW_TILES / 2 - 1, x1: x + VIEW_TILES / 2 + 1, y1: y + VIEW_TILES / 2 + 1 }, ART_BUDGET_OVERVIEW);
+      }
       if (phaseRef.current.name === 'playing') {
         clock.current += dt;
         let g = step(game.current, { type: 'tick', seconds: dt });
@@ -156,11 +216,13 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
         // what happened: haptics and a short caption
         for (const e of g.events) {
           if (e.seq <= lastSeq) continue;
-          if (e.type === 'lowLight') haptic.warning();
-          else if (e.type === 'lit' || e.type === 'autoLight') haptic.bump();
-          else if (e.type === 'pickup' || e.type === 'refill') haptic.tap();
+          if (e.type === 'lowLight' || e.type === 'hit') haptic.warning();
+          else if (e.type === 'lit' || e.type === 'autoLight' || e.type === 'trapFired' || e.type === 'sandNear') haptic.bump();
+          else if (e.type === 'pickup' || e.type === 'refill' || e.type === 'plate') haptic.tap();
+          else if (e.type === 'quake') haptic.heavy();
           const text = captionFor(e);
           if (text) caption.current = { id: e.seq + g.floorIndex * 1000, text, until: clock.current + CAPTION_SECONDS };
+          if (e.type === 'quake') showHint('collapse', g.floorIndex * 1000 + e.seq);
           hudDirty.current = true;
         }
         lastSeq = g.eventSeq;
@@ -172,6 +234,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
         // the strip text: at most 4 times a second, or at once after an event
         sinceHud += dt;
         if (hudDirty.current || sinceHud >= 0.25) {
+          if (sinceHud >= 0.25) checkHints(g);
           sinceHud = 0;
           hudDirty.current = false;
           if (caption.current && clock.current > caption.current.until) caption.current = null;
@@ -205,7 +268,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [walker]);
+  }, [walker, showHint, checkHints]);
 
   // overlays and focus changes stop any walking in progress
   useEffect(() => {
@@ -225,16 +288,33 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       hudDirty.current = true;
       setPhase({ name: 'overview', from, to: from + 1, kind: 'descend' });
       setVersion((v) => v + 1);
+    } else if (status === 'falling') {
+      // the slab tilts open (0.25 s), then the next floor starts where the shaft lets you out
+      const id = setTimeout(() => {
+        const g = game.current;
+        if (g.status !== 'falling') return;
+        const from = g.floorIndex;
+        game.current = step(g, { type: 'continue' });
+        reachFloor(pyramid.id, from + 1);
+        haptic.heavy();
+        hudDirty.current = true;
+        setPhase({ name: 'overview', from, to: from + 1, kind: 'fall' });
+        setVersion((v) => v + 1);
+      }, reducedMotion ? 0 : FALL_SECONDS * 1000);
+      return () => clearTimeout(id);
     } else if (status === 'burntOut') {
       haptic.warning();
       setPhase({ name: 'burntOut' });
+    } else if (status === 'buried') {
+      haptic.warning();
+      setPhase({ name: 'buried' });
     } else if (status === 'escaped' && !leaving.current) {
       leaving.current = true;
       haptic.success();
       takeArtifact(pyramid.id);
       router.replace({ pathname: '/artifact/[id]', params: { id: pyramid.id } });
     }
-  }, [status, pyramid.id, reachFloor, takeArtifact]);
+  }, [status, pyramid.id, reachFloor, takeArtifact, reducedMotion]);
 
   const pause = useCallback(() => {
     if (phaseRef.current.name === 'playing') setPhase({ name: 'paused' });
@@ -360,19 +440,20 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const viewTiles = Math.min(s.floor.size, VIEW_TILES);
   const tilePx = boardSize / viewTiles;
   const info = pyramid.color;
-  // the architecture is baked once per floor, hidden under the overview
-  const art = useMemo(
-    () => bakeFloor(s.floor, themeFor(pyramid.id, info), bakeTilePx(s.floor.size, tilePx, PixelRatio.get())),
-    [s.floor, tilePx, pyramid.id, info],
-  );
+  const theme = useMemo(() => themeFor(pyramid.id, info), [pyramid.id, info]);
+  const px = Math.round(tilePx * Math.min(PixelRatio.get(), 2));
+  // the architecture is recorded once per floor (hidden under the overview) and rasterised in chunks as you walk
+  const art = useMemo(() => createFloorArt(s.floor, theme, px), [s.floor, theme, px]);
+  artRef.current = art;
   const mask = useMemo(() => createLightMask(s.floor.size), [s.floor.size]);
-  // free the previous floor's image once the new one is in place (the GC frees the rest)
-  const prevArt = useRef<typeof art>(null);
+  // free the previous floor's chunks once the new art is in place (the GC frees the rest)
+  const prevArt = useRef<FloorArt | null>(null);
   useEffect(() => {
     const old = prevArt.current;
     prevArt.current = art;
     if (old && old !== art) old.dispose();
   }, [art]);
+  useEffect(() => () => prevArt.current?.dispose(), []);
   // snap the camera onto a new floor
   if (cam.current.floor !== s.floor) {
     const half = viewTiles / 2;
@@ -401,7 +482,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       </View>
 
       <View style={{ width: boardSize, height: STRIP_H + STRIP_GAP + boardSize }}>
-        <Board game={game} cam={cam} art={art} mask={mask} boardSize={boardSize} tilePx={tilePx} drawRef={drawRef} />
+        <Board game={game} cam={cam} art={art} theme={theme} mask={mask} reducedMotion={reducedMotion} boardSize={boardSize} tilePx={tilePx} drawRef={drawRef} />
         <LightHud hud={hud} width={boardSize} onSwap={swap} />
         <View
           style={{ position: 'absolute', left: 0, top: STRIP_H + STRIP_GAP, width: boardSize, height: boardSize }}
@@ -466,6 +547,16 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
             />
           </PanelActions>
           <Text style={styles.note}>Leaving now, you start again from {campLabel(checkpoint)}.</Text>
+        </Panel>
+      )}
+
+      {phase.name === 'buried' && (
+        <Panel eyebrow={floorText} title="Sealed in by sand">
+          <PanelText>The sand has closed every way down. You dig back to {campLabel(checkpoint)}.</PanelText>
+          <PanelActions>
+            <Button variant="primary" label={checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={retry} />
+            <Button variant="ghost" label="Leave to the map" onPress={leaveToMap} />
+          </PanelActions>
         </Panel>
       )}
 

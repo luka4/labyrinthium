@@ -1,6 +1,8 @@
 import { Redirect, router, useLocalSearchParams } from 'expo-router';
+import { useEffect } from 'react';
 import { ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
+import { warmLayouts } from '../../game/core/generate';
 import { PYRAMIDS, campFloorNumbers, isPyramidId } from '../../game/core/pyramids';
 import { drawPyramidSide, sideLayout } from '../../game/render/drawPyramidSide';
 import { isUnlocked, useProgress } from '../../state/progress';
@@ -21,7 +23,17 @@ export default function PyramidScreen() {
   const deepest = useProgress((s) => (isPyramidId(id) ? s.deepest[id] : undefined));
   const completions = useProgress((s) => (isPyramidId(id) ? s.completions[id] : undefined));
 
-  if (!isPyramidId(id) || !isUnlocked(id, artifacts)) return <Redirect href="/map" />;
+  const valid = isPyramidId(id) && isUnlocked(id, artifacts);
+  const warmTo = campFloor ?? 0;
+  // generate the floor chain down to the checkpoint in the background, so resuming is instant
+  useEffect(() => {
+    if (!valid) return;
+    const abort = new AbortController();
+    warmLayouts(PYRAMIDS[id], warmTo, abort.signal);
+    return () => abort.abort();
+  }, [valid, id, warmTo]);
+
+  if (!isPyramidId(id) || !valid) return <Redirect href="/map" />;
   const p = PYRAMIDS[id];
   const taken = !!artifacts[id];
   const checkpoint = campFloor ?? 0;
@@ -57,7 +69,7 @@ export default function PyramidScreen() {
 
         <View style={styles.facts}>
           <Fact label="Floors" value={`${p.floorCount}`} />
-          <Fact label="Camp floors" value={camps.length ? camps.join(' & ') : 'none'} />
+          <Fact label="Camp floors" value={listNumbers(camps)} />
           <Fact label="Deepest" value={deepest === undefined ? '—' : `floor ${deepest + 1}`} />
         </View>
 
@@ -87,6 +99,12 @@ export default function PyramidScreen() {
       </View>
     </Screen>
   );
+}
+
+/** "5, 10, 14 & 25" */
+function listNumbers(n: number[]): string {
+  if (!n.length) return 'none';
+  return n.length === 1 ? `${n[0]}` : `${n.slice(0, -1).join(', ')} & ${n[n.length - 1]}`;
 }
 
 function Fact({ label, value }: { label: string; value: string }) {

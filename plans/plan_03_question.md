@@ -282,3 +282,15 @@ Real v2 saves only hold camps 4 and 9 (still valid) and `deepest` never shrinks.
 
 ### R19. Fall timing on screen
 **Picked:** the screen waits 0.25 s after `falling` before `continue`, so the tilt-and-drop sprite plays; core is unaffected.
+
+## Implementation decisions
+
+- Trapdoor delay 0.1 s (plan 0.2 s): a continuous walker leaves a tile after 0.15 s, so 0.2 s would never drop anyone. Pick: 0.1.
+- Sandfall guards: items in rooms are rare, so goods = items off the main path plus shrine candles; plate at room-BFS 2-4; area BFS within the room. Block plates need >= 3 open flagstone neighbours (gallery rooms allowed). Plan's 3x3 clear was too strict.
+- Trapdoor landing pre-check uses 0.55 x stairs distance and a worst-case re-resolve with a trap on the landing (the check asks 0.4), because traps below shift the landing.
+- ASCII legend: X block, P portcullis plate, = port, $ sandfall, v trapdoor (b/s already bench/sconce). `--sand` shows rank deciles.
+- Tuned rows: sandfall targets lowered where supply is short (13, 21-24); collapse delay/rate/cap raised on floors 11-25 from the deep bot.
+- Bot: the plain bot cannot reach floors 11-25 on found light, so a "deep bot" plays floors 11-25 alone with reserves; remaining warns: sealed-in 0 % on floors 11-13, 17.
+- Replay: legacy hash (floors 1/5/9) unchanged by traps; full hash for floors 11/17/24 committed.
+- Floor art: chunks are drawn whole (padding included, overlapping) with drawImageRectOptions because it uses strict src constraint. Pixel diff vs old bake on a trap-free floor: max channel diff 9.
+- Not done: dust puff/shake on the fall overview; headless render only (no device or web run).

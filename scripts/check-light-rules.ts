@@ -14,11 +14,13 @@ import {
 } from '../src/game/core/game';
 import { BAG_SIZE, CARRY, EMBER, STEP_SECONDS, radiusOf } from '../src/game/core/lights';
 import { MEMORY_STEPS, memoryLevel } from '../src/game/core/memory';
+import { COVER, sandLevel } from '../src/game/core/collapse';
+import { EGYPT_ROWS } from '../src/game/core/egypt';
 import { PYRAMIDS } from '../src/game/core/pyramids';
 import { createRng } from '../src/game/core/rng';
 import { exits, holdDir, runDir } from '../src/game/core/walk';
 
-type Report = { fail: (m: string) => void; warn: (m: string) => void };
+type Report = { fail: (m: string) => void; warn: (m: string) => void; snapshot: Record<string, string>; old: Record<string, string>; update: boolean };
 
 /** a player walks slower than the 0.15 s cadence: swipes, looking around, backtracking */
 const BOT_STEP = 0.3;
@@ -26,7 +28,7 @@ const BOT_STEP = 0.3;
 const OPP: Record<Direction, Direction> = { 0: 1, 1: 0, 2: 3, 3: 2 };
 
 function openNeighbors(s: GameState, pos = s.pos): Array<{ dir: Direction; tile: number }> {
-  const { size, solid } = s.floor;
+  const { size, solid } = s.grid;
   const out: Array<{ dir: Direction; tile: number }> = [];
   for (let d = 0; d < 4; d++) {
     const x = (pos % size) + DIRS[d][0];
@@ -43,7 +45,7 @@ function go(s: GameState, dir: Direction): GameState {
   return step(s, { type: 'move', dir });
 }
 
-function hashState(s: GameState): string {
+function hashState(s: GameState, full = false): string {
   let h = 0x811c9dc5;
   const mix = (v: number) => {
     h ^= v & 255;
@@ -70,6 +72,23 @@ function hashState(s: GameState): string {
   for (const v of s.walkedAt) num(v);
   num(s.status === 'playing' ? 0 : s.status.length);
   num(s.trail);
+  if (full) {
+    // plan 03: traps, the collapse, the run's masks, sand, status
+    for (const v of s.trapPhase) num(v);
+    for (const v of s.trapTimer) num(v);
+    if (s.collapse) {
+      num(s.collapse.fill);
+      num(s.collapse.covered);
+      num(s.collapse.blocked);
+      num(s.collapse.pending);
+    }
+    for (const v of s.grid.solid) mix(v);
+    for (const v of s.sand) mix(v);
+    for (const v of s.localSand) mix(v);
+    for (let k = 0; k < s.status.length; k++) mix(s.status.charCodeAt(k));
+    num(s.prevPos);
+    num(s.skipped);
+  }
   return h.toString(16);
 }
 
@@ -80,7 +99,7 @@ function forced(s: GameState, kind: 'oilJar' | 'candle' | 'smallTorch' | 'lamp' 
   return { s, dir: n.dir };
 }
 
-export function runLightChecks({ fail, warn }: Report) {
+export function runLightChecks({ fail, warn, snapshot, old, update }: Report) {
   const egypt = PYRAMIDS.egypt;
 
   // ---- rules --------------------------------------------------------------------
@@ -184,7 +203,7 @@ export function runLightChecks({ fail, warn }: Report) {
     for (let i = 0; i < 1000; i++) {
       s = step(s, { type: 'tick', seconds: 1 / 60 });
       const before = s.pos;
-      let d = holdDir(s.floor, s.pos, dir);
+      let d = holdDir(s.grid, s.pos, dir);
       if (d === null || openNeighbors(s).find((o) => o.dir === d)?.tile === s.floor.stairs) d = noStairs(s).find((o) => o.dir !== OPP[dir])?.dir ?? noStairs(s)[0].dir;
       dir = d;
       s = step(s, { type: 'move', dir });
@@ -241,29 +260,30 @@ export function runLightChecks({ fail, warn }: Report) {
       } else if (ex.length === 3) {
         const blocked = ([0, 1, 2, 3] as Direction[]).find((d) => !ex.includes(d))!;
         if (holdDir(floor, i, blocked) !== null) fail('walk: holdDir does not stop at a T junction');
-        if (runDir(floor, i, ex[0], () => false) !== null) fail('walk: runDir does not stop at a junction');
+        if (runDir(floor, floor, i, ex[0], () => false) !== null) fail('walk: runDir does not stop at a junction');
         tee++;
       } else if (ex.length === 1) {
         if (holdDir(floor, i, ex[0]) !== null && holdDir(floor, i, OPP[ex[0]]) !== null) fail('walk: holdDir does not stop at a dead end');
         dead++;
       }
-      if (floor.tiles[i] === TILE.DOOR && ex.length === 2 && runDir(floor, i, ex[0], () => false) !== null) fail('walk: runDir does not stop at a door');
+      if (floor.tiles[i] === TILE.DOOR && ex.length === 2 && runDir(floor, floor, i, ex[0], () => false) !== null) fail('walk: runDir does not stop at a door');
     }
     if (!bend || !tee || !dead) warn(`walk: coverage bend ${bend} tee ${tee} dead end ${dead}`);
     const ci = floor.start;
     const cex = exits(floor, ci);
-    if (cex.length === 2 && runDir(floor, ci, cex[0], () => true) !== null) fail('walk: runDir does not stop next to an item');
+    if (cex.length === 2 && runDir(floor, floor, ci, cex[0], () => true) !== null) fail('walk: runDir does not stop next to an item');
   }
 
   // ---- replay determinism -----------------------------------------------------------
-  for (const fi of [0, 4, 9]) {
+  for (const fi of [0, 4, 8, 10, 16, 23]) {
+    const full = fi >= 10;
     const hashes: string[] = [];
     for (let run = 0; run < 2; run++) {
       const rng = createRng(1234 + fi);
       let s = startFloor(egypt, fi, { kind: 'bigTorch', left: 100 }, [{ kind: 'lamp', left: 150 }, { kind: 'candle', left: 90 }]);
       for (let a = 0; a < 3000; a++) {
         if (s.status !== 'playing') break;
-        if (a % 2 === 0) s = step(s, { type: 'tick', seconds: 1 / 60 });
+        if (a % 2 === 0) s = step(s, { type: 'tick', seconds: full ? 0.1 : 1 / 60 });
         else {
           const opts = openNeighbors(s).filter((o) => o.tile !== s.floor.stairs);
           const dir = rng() < 0.75 && opts.length ? opts[Math.floor(rng() * opts.length)].dir : (Math.floor(rng() * 4) as Direction);
@@ -271,80 +291,150 @@ export function runLightChecks({ fail, warn }: Report) {
         }
         if (a % 400 === 399) s = step(s, { type: 'swap', slot: Math.floor(rng() * 3) });
       }
-      hashes.push(hashState(s));
+      hashes.push(hashState(s, full));
     }
     if (hashes[0] !== hashes[1]) fail(`replay: egypt floor ${fi + 1} diverged between two runs`);
+    // committed hash: a refactor must reproduce today's behaviour exactly
+    snapshot[`replay:${fi}`] = hashes[0];
+    if (old[`replay:${fi}`] && old[`replay:${fi}`] !== hashes[0] && !update) fail(`replay: egypt floor ${fi + 1} hash changed ${old[`replay:${fi}`]} -> ${hashes[0]} (--update only if deliberate)`);
   }
 
-  // ---- light budget bot ---------------------------------------------------------------
+  // ---- light budget bot (plan 02, extended by plan 03) ------------------------------------------
+  // Explores until the stairs are seen, takes items within 8 steps, never swaps; avoids seen armed
+  // traps and covered sand when another frontier exists; retries from the last camp (<= 3 per floor).
   const left = (s: GameState) => Math.max(0, s.hand.left) + s.bag.reduce((t, b) => t + b.left, 0);
-  type Row = { used: number; found: number; atStairs: number; burnt: number; runs: number };
-  const rows: Row[] = Array.from({ length: egypt.floorCount }, () => ({ used: 0, found: 0, atStairs: 0, burnt: 0, runs: 0 }));
-  const SEEDS = 16;
+  type Row = { used: number[]; found: number; atStairs: number; burnt: number; sealed: number; starts: number; runs: number; hits: number; falls: number };
+  const rows: Row[] = Array.from({ length: egypt.floorCount }, () => ({ used: [], found: 0, atStairs: 0, burnt: 0, sealed: 0, starts: 0, runs: 0, hits: 0, falls: 0 }));
+  const SEEDS = Number(process.env.BOT_SEEDS ?? 20);
   for (let seed = 1; seed <= SEEDS; seed++) {
     const pyramid: Pyramid = { ...egypt, id: `bot${seed}`, seed };
     let s = startFloor(pyramid, 0);
+    rows[0].starts++;
     let floorTime = 0;
     let foundSecs = 0;
+    let lastSeq = 0;
+    const retries = new Array<number>(pyramid.floorCount).fill(0);
     let guard = 0;
-    while (s.floorIndex < pyramid.floorCount && guard++ < 6000) {
-      const row = rows[s.floorIndex];
-      if (s.status === 'burntOut') {
-        row.burnt++;
-        row.runs++;
-        row.used += floorTime;
-        row.found += foundSecs;
-        // the bot gives up on this seed at the first burnout to keep the report about a single descent
-        break;
+    const floorBest = () => rows[s.floorIndex];
+    while (s.floorIndex < pyramid.floorCount && guard++ < 60000) {
+      const row = floorBest();
+      for (const e of s.events) {
+        if (e.seq <= lastSeq) continue;
+        if (e.type === 'hit') row.hits++;
+        if (e.type === 'fell') row.falls++;
       }
-      if (s.status === 'descending') {
+      lastSeq = s.eventSeq;
+      if (s.status === 'burntOut' || s.status === 'buried') {
+        if (s.status === 'burntOut') row.burnt++;
+        else row.sealed++;
+        if (retries[s.floorIndex]++ >= 3) break;
+        s = step(s, { type: 'retry' });
+        lastSeq = 0;
+        rows[s.floorIndex].starts++;
+        floorTime = 0;
+        foundSecs = 0;
+        continue;
+      }
+      if (s.status === 'descending' || s.status === 'falling') {
         row.runs++;
-        row.used += floorTime;
+        row.used.push(floorTime);
         row.found += foundSecs;
         row.atStairs += left(s);
         floorTime = 0;
         foundSecs = 0;
         s = step(s, { type: 'continue' });
+        lastSeq = 0;
+        if (s.floorIndex < pyramid.floorCount) rows[s.floorIndex].starts++;
         continue;
       }
       if (s.status === 'escaped') {
         row.runs++;
-        row.used += floorTime;
+        row.used.push(floorTime);
         row.found += foundSecs;
         row.atStairs += left(s);
         break;
       }
-      const dir = botDir(s);
+      const dir = botDir(s, false) ?? botDir(s, true);
       if (dir === null) break;
       s = step(s, { type: 'tick', seconds: BOT_STEP });
       floorTime += BOT_STEP;
       const items = s.items.size;
       const handBefore = s.hand.left;
-      const bagBefore = s.bag.length;
       s = step(s, { type: 'move', dir });
       if (s.items.size < items) {
         const ev = s.events[s.events.length - 1];
         foundSecs += ev?.type === 'pickup' ? CARRY[ev.kind as keyof typeof CARRY].seconds : ev?.type === 'refill' ? Math.max(0, CARRY[s.hand.kind].seconds - handBefore) : 0;
-        void bagBefore;
       }
     }
   }
-  console.log('light budget bot (explore until the stairs are seen, take items within 8 steps, never swap):');
-  console.log('floor runs used(s) found(s) left@stairs(s) burnouts');
+  console.log('light budget bot (explore until the stairs are seen, take items within 8 steps, never swap; retries from the last camp):');
+  console.log('floor runs median(s)/target found(s) left@stairs(s) burnouts sealed% hits falls');
+  const median = (a: number[]) => (a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0);
   rows.forEach((r, i) => {
-    const n = Math.max(1, r.runs - r.burnt);
-    console.log(`${i + 1} ${r.runs} ${(r.used / Math.max(1, r.runs)).toFixed(0)} ${(r.found / Math.max(1, r.runs)).toFixed(0)} ${(r.atStairs / n).toFixed(0)} ${r.burnt}`);
+    const n = Math.max(1, r.runs);
+    const med = median(r.used);
+    const target = EGYPT_ROWS[i].target;
+    const sealedRate = r.starts ? (r.sealed / r.starts) * 100 : 0;
+    console.log(`${i + 1} ${r.runs} ${med.toFixed(0)}/${target} ${(r.found / n).toFixed(0)} ${(r.atStairs / n).toFixed(0)} ${r.burnt} ${sealedRate.toFixed(0)}% ${r.hits} ${r.falls}`);
     if (i < 3 && r.burnt > 0) fail(`budget: the bot burnt out on floor ${i + 1}`);
-    if (i < 3 && r.runs - r.burnt > 0 && r.atStairs / n < 20) fail(`budget: floor ${i + 1} leaves only ${(r.atStairs / n).toFixed(0)} s (want >= 20)`);
+    if (i < 3 && r.runs > 0 && r.atStairs / n < 20) fail(`budget: floor ${i + 1} leaves only ${(r.atStairs / n).toFixed(0)} s (want >= 20)`);
+    if (i < 10 && r.runs >= 5 && (med < 0.6 * target || med > 1.6 * target)) warn(`budget: floor ${i + 1} median ${med.toFixed(0)} s outside 0.6-1.6 x target ${target} s`);
   });
+
+  // ---- deep bot: floors 11-25 each with the reserves of a decent player (the plain bot cannot reach them) ----
+  {
+    type Deep = { runs: number; sealed: number; burnt: number; used: number[]; hits: number; falls: number };
+    const deep: Deep[] = Array.from({ length: egypt.floorCount }, () => ({ runs: 0, sealed: 0, burnt: 0, used: [], hits: 0, falls: 0 }));
+    for (let seed = 1; seed <= SEEDS; seed++) {
+      const pyramid: Pyramid = { ...egypt, id: `deep${seed}`, seed };
+      for (let i = 10; i < pyramid.floorCount; i++) {
+        let s = startFloor(pyramid, i, { kind: 'bigTorch', left: 100 }, [{ kind: 'lamp', left: 150 }, { kind: 'candle', left: 90 }]);
+        let t = 0;
+        let lastSeq = 0;
+        let guard = 0;
+        const d = deep[i];
+        while (s.status === 'playing' && guard++ < 4000) {
+          const dir = botDir(s, false) ?? botDir(s, true);
+          if (dir === null) break;
+          s = step(s, { type: 'tick', seconds: BOT_STEP });
+          t += BOT_STEP;
+          s = step(s, { type: 'move', dir });
+          for (const e of s.events) {
+            if (e.seq <= lastSeq) continue;
+            if (e.type === 'hit') d.hits++;
+          }
+          lastSeq = s.eventSeq;
+        }
+        d.runs++;
+        if (s.status === 'buried') d.sealed++;
+        else if (s.status === 'burntOut' || s.status === 'playing') d.burnt++;
+        else {
+          d.used.push(t);
+          if (s.status === 'falling') d.falls++;
+        }
+      }
+    }
+    console.log('deep bot (floors 11-25 alone, with a big torch, a lamp and a candle in reserve):');
+    console.log('floor runs median(s)/target sealed% failed hits falls');
+    const med = (a: number[]) => (a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0);
+    deep.forEach((d, i) => {
+      if (i < 10) return;
+      const target = EGYPT_ROWS[i].target;
+      const m = med(d.used);
+      const rate = (d.sealed / d.runs) * 100;
+      console.log(`${i + 1} ${d.runs} ${m.toFixed(0)}/${target} ${rate.toFixed(0)}% ${d.burnt} ${d.hits} ${d.falls}`);
+      if (d.used.length >= 5 && (m < 0.6 * target || m > 1.6 * target)) warn(`deep bot: floor ${i + 1} median ${m.toFixed(0)} s outside 0.6-1.6 x target ${target} s`);
+      if (i <= 23 && (rate < 3 || rate > 20)) warn(`deep bot: floor ${i + 1} sealed-in rate ${rate.toFixed(0)}% outside 3-20 %`);
+    });
+  }
   void radiusOf;
   void isCampFloor;
 }
 
-/** BFS target choice for the bot; null when nothing is left to do. */
-function botDir(s: GameState): Direction | null {
+/** BFS target choice for the bot; null when nothing is left to do. `allowAvoided` walks over seen armed traps and covered sand. */
+function botDir(s: GameState, allowAvoided: boolean): Direction | null {
   const { floor } = s;
-  const { size, solid } = floor;
+  const { size, solid } = s.grid;
   const dist = new Int32Array(size * size).fill(-1);
   const first = new Int8Array(size * size).fill(-1);
   const queue = [s.pos];
@@ -363,6 +453,11 @@ function botDir(s: GameState): Direction | null {
       if (solid[q] || dist[q] >= 0) continue;
       // never walk over the stairs before the bot wants them
       if (q === floor.stairs && !stairsSeen) continue;
+      if (!allowAvoided) {
+        const k = floor.trapAt[q];
+        if (k >= 0 && s.trapPhase[k] === 0 && s.seenAt[q] >= 0) continue;
+        if (sandLevel(s, q) >= COVER) continue;
+      }
       dist[q] = dist[p] + 1;
       first[q] = p === s.pos ? d : first[p];
       queue.push(q);

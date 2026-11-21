@@ -72,6 +72,44 @@ export type Fixture = { tile: number; kind: FixtureKind; wall: number | null; et
 
 export type Lattice = { n: number; colX: number[]; rowY: number[]; axisX: number[]; axisY: number[] };
 
+/**
+ * The masks a run reads (movement and light). A `Floor` fits it; during a run `GameState.grid`
+ * holds per-run copies that traps and the collapse change.
+ */
+export type Grid = { size: number; solid: Uint8Array; opaque: Uint8Array };
+
+/** The four trap kinds of plan 03: three pressure plates (egypt) and the trapdoor. */
+export type TrapKind = 'block' | 'portcullis' | 'sandfall' | 'trapdoor';
+
+export type Trap = {
+  kind: TrapKind;
+  /** the plate / the trapdoor slab */
+  tile: number;
+  /** block: = tile; portcullis: the port tile it seals; sandfall: the guarded item tile; trapdoor: -1 */
+  target: number;
+  /** sandfall: tiles it buries, in BFS order from the plate; empty for the others */
+  area: Int32Array;
+  /** seconds from press to effect */
+  delay: number;
+  /** trapdoor: where you land, in world coordinates (floor centre = 0,0, as `arrivalWorld`) */
+  landingWorld: { x: number; y: number } | null;
+};
+
+/** What the collapse of the floor above does here: sand pours in over the stairwell and spreads. */
+export type Collapse = {
+  delay: number;
+  /** tiles per second */
+  rate: number;
+  /** most tiles covered */
+  cap: number;
+  /** sand-graph tiles in BFS order from the STAIRS_UP tiles, ranked part only */
+  order: Int32Array;
+  /** per tile: index in `order`, or -1 */
+  rank: Int32Array;
+  /** per tile: BFS steps from the source, -1 unreached */
+  sdist: Int32Array;
+};
+
 export type Floor = {
   /** tiles per side */
   size: number;
@@ -100,6 +138,27 @@ export type Floor = {
   /** loop edges added on top of the spanning tree */
   loops: number;
   seed: number;
+  /** BFS steps from `start` over the static mask, -1 unreached */
+  dist: Int32Array;
+  /** pressure plates and trapdoors (traps.ts) */
+  traps: Trap[];
+  /** per tile: trap index or -1 (plate / trapdoor tile) */
+  trapAt: Int16Array;
+  /** ports that could have held a portcullis (the supply; counts are targets) */
+  eligiblePorts: number;
+  /** the collapse from floor 11 on (collapse.ts), else null */
+  collapse: Collapse | null;
+};
+
+/**
+ * Everything of a floor that does not need items: rooms, masks, start, stairs, main path, spots.
+ * Floor i+1's arrival needs floor i's stairs and trapdoors on floor i need floor i+1's layout, so
+ * layouts are generated first (generate.ts `layoutFor`) and features are added per floor played.
+ */
+export type Layout = Omit<Floor, 'items' | 'fixtures' | 'traps' | 'trapAt' | 'eligiblePorts' | 'collapse'> & {
+  braziers: Fixture[];
+  arrivalRoom: number;
+  stairsRoom: number;
 };
 
 export const DIRS: ReadonlyArray<readonly [number, number]> = [

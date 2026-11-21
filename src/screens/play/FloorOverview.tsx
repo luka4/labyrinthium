@@ -7,7 +7,7 @@ import { drawPyramidSide, sideLayout } from '../../game/render/drawPyramidSide';
 import { ArtCanvas, useTicker } from '../../ui/ArtCanvas';
 import { colors, fonts, space, type } from '../../ui/theme';
 
-export type OverviewKind = 'enter' | 'descend' | 'resume';
+export type OverviewKind = 'enter' | 'descend' | 'resume' | 'fall';
 
 const SLIDE_MS = 650;
 const SHOW_MS = 2400;
@@ -51,7 +51,15 @@ export function FloorOverview({
   const keep = artifactTaken ? 'was kept' : 'is kept';
 
   const title =
-    kind === 'enter' ? 'You wake at the top' : kind === 'resume' ? (to === 0 ? 'Back at the top' : `Camp · floor ${to + 1}`) : `Floor ${to + 1} of ${N}`;
+    kind === 'enter'
+      ? 'You wake at the top'
+      : kind === 'resume'
+        ? to === 0
+          ? 'Back at the top'
+          : `Camp · floor ${to + 1}`
+        : kind === 'fall'
+          ? 'The floor gave way'
+          : `Floor ${to + 1} of ${N}`;
   const line =
     left === 0
       ? `The basement, where the ${pyramid.artifact} ${keep}. Find it.`

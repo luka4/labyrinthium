@@ -1,6 +1,7 @@
 import {
   ROOM_CARVERS,
   profileFor,
+  linearLoopRate,
   type Dir,
   type GenContext,
   type GenSpec,
@@ -16,12 +17,15 @@ import {
   distancesFrom,
   floorSeed,
   type Floor,
+  type Layout,
   type Fixture,
   type RoomKind,
   type Spot,
 } from './floor';
 import type { Pyramid } from './game';
+import { buildSandOrder } from './collapse';
 import { placeBraziers, placeLights } from './placeLights';
+import { placeTraps } from './traps';
 import { createRng, shuffle } from './rng';
 
 /**
@@ -40,12 +44,11 @@ function popcount(m: number): number {
   return (m & 1) + ((m >> 1) & 1) + ((m >> 2) & 1) + ((m >> 3) & 1);
 }
 
-export function generateFloor(spec: GenSpec): Floor {
+export function generateLayout(spec: GenSpec): Layout {
   const profile = profileFor(spec.profile);
   const { floorIndex } = spec;
   const layout = createRng(spec.seed);
   const roomsRng = createRng(spec.seed ^ 0x9e3779b9);
-  const itemsRng = createRng(spec.seed ^ 0x85ebca6b);
 
   // 1. lattice ---------------------------------------------------------------
   const n = profile.sites[Math.min(floorIndex, profile.sites.length - 1)];
@@ -194,8 +197,7 @@ export function generateFloor(spec: GenSpec): Floor {
   }
 
   // 6. loops -----------------------------------------------------------------
-  const { fromFloor, maxRate, atFloor } = profile.loops;
-  const rate = floorIndex < fromFloor ? 0 : (maxRate * Math.min(floorIndex - fromFloor + 1, atFloor - fromFloor + 1)) / (atFloor - fromFloor + 1);
+  const rate = profile.loopRate ? profile.loopRate(floorIndex) : linearLoopRate(profile.loops, floorIndex);
   const loopOptions: Array<[number, number]> = [];
   for (let s = 0; s < sites; s++)
     for (const k of [0, 2]) {
@@ -437,7 +439,38 @@ export function generateFloor(spec: GenSpec): Floor {
     sp.main = !!onPath[sp.tile];
   }
 
-  // 11. light sources: found items, sconces, shrine candles ---------------------------
+  return {
+    size,
+    tiles,
+    solid,
+    opaque,
+    room: roomOf,
+    rooms,
+    links,
+    start,
+    stairs,
+    braziers: fixtures,
+    spots,
+    mainPath,
+    lattice,
+    profile: spec.profile,
+    loops: loopCount,
+    seed: spec.seed,
+    dist,
+    arrivalRoom,
+    stairsRoom,
+  };
+}
+
+/**
+ * Features of a floor, after the layout: found light (items rng `seed ^ 0x85ebca6b`, the same
+ * stream as before the split), then pressure plates and the collapse sand order.
+ */
+export function addFeatures(layout: Layout, spec: GenSpec, below: Layout | null): Floor {
+  const profile = profileFor(spec.profile);
+  const { size, tiles, solid, room: roomOf, rooms, spots, dist, mainPath, arrivalRoom, stairsRoom, start, stairs } = layout;
+  const onPath = new Uint8Array(size * size);
+  for (const p of mainPath) onPath[p] = 1;
   const lights = placeLights({
     profile,
     size,
@@ -453,56 +486,76 @@ export function generateFloor(spec: GenSpec): Floor {
     stairsRoom,
     start,
     stairs,
-    floorIndex,
-    rng: itemsRng,
+    floorIndex: spec.floorIndex,
+    rng: createRng(spec.seed ^ 0x85ebca6b),
   });
-  fixtures.push(...lights.sconces, ...lights.shrines);
-
-  return {
-    size,
-    tiles,
-    solid,
-    opaque,
-    room: roomOf,
-    rooms,
-    links,
-    start,
-    stairs,
-    items: lights.items,
-    fixtures,
-    spots,
-    mainPath,
-    lattice,
-    profile: spec.profile,
-    loops: loopCount,
-    seed: spec.seed,
-  };
+  const fixtures: Fixture[] = [...layout.braziers, ...lights.sconces, ...lights.shrines];
+  const { braziers: _braziers, arrivalRoom: _a, stairsRoom: _s, ...rest } = layout;
+  void _braziers;
+  void _a;
+  void _s;
+  const placed = placeTraps({ layout, items: lights.items, fixtures, spec, below, rng: createRng(spec.seed ^ 0x2545f491) });
+  const collapse = buildSandOrder(layout, profile.collapse?.(spec.floorIndex) ?? null);
+  return { ...rest, items: lights.items, fixtures, traps: placed.traps, trapAt: placed.trapAt, eligiblePorts: placed.eligiblePorts, collapse };
 }
 
-const memo = new Map<string, Floor>();
+export function generateFloor(spec: GenSpec, below: Layout | null = null): Floor {
+  return addFeatures(generateLayout(spec), spec, below);
+}
 
-/**
- * The floor of a pyramid. Floors are world-aligned: you arrive under the previous
- * floor's stairs, so floor k depends on floors 0..k-1 (memoised per session).
- */
-export function floorFor(pyramid: Pyramid, floorIndex: number): Floor {
-  const key = `${pyramid.id}:${pyramid.seed}:${floorIndex}`;
-  const hit = memo.get(key);
-  if (hit) return hit;
+const layoutMemo = new Map<string, Layout>();
+const floorMemo = new Map<string, Floor>();
+
+export function specFor(pyramid: Pyramid, floorIndex: number): GenSpec {
   let arrivalWorld: { x: number; y: number } | null = null;
   if (floorIndex > 0) {
-    const above = floorFor(pyramid, floorIndex - 1);
+    const above = layoutFor(pyramid, floorIndex - 1);
     const half = above.size >> 1;
     arrivalWorld = { x: (above.stairs % above.size) - half, y: Math.floor(above.stairs / above.size) - half };
   }
-  const floor = generateFloor({
+  return {
     seed: floorSeed(pyramid, floorIndex),
     floorIndex,
     basement: floorIndex === pyramid.floorCount - 1,
-    camp: pyramid.campEvery > 0 && floorIndex > 0 && (floorIndex + 1) % pyramid.campEvery === 0,
+    camp: pyramid.camps.includes(floorIndex) && floorIndex > 0,
+    nextIsCamp: pyramid.camps.includes(floorIndex + 1),
     profile: pyramid.architecture,
     arrivalWorld,
-  });
-  memo.set(key, floor);
+  };
+}
+
+/**
+ * The layout of a floor of a pyramid. Floors are world-aligned: you arrive under the previous
+ * floor's stairs, so layout k depends on layouts 0..k-1 (memoised per session).
+ */
+export function layoutFor(pyramid: Pyramid, floorIndex: number): Layout {
+  const key = `${pyramid.id}:${pyramid.seed}:${floorIndex}`;
+  const hit = layoutMemo.get(key);
+  if (hit) return hit;
+  const layout = generateLayout(specFor(pyramid, floorIndex));
+  layoutMemo.set(key, layout);
+  return layout;
+}
+
+/** The played floor: layout plus lights, traps and the collapse (memoised). */
+export function floorFor(pyramid: Pyramid, floorIndex: number): Floor {
+  const key = `${pyramid.id}:${pyramid.seed}:${floorIndex}`;
+  const hit = floorMemo.get(key);
+  if (hit) return hit;
+  const below = floorIndex + 1 < pyramid.floorCount ? layoutFor(pyramid, floorIndex + 1) : null;
+  const floor = addFeatures(layoutFor(pyramid, floorIndex), specFor(pyramid, floorIndex), below);
+  floorMemo.set(key, floor);
   return floor;
+}
+
+/** Generates the layouts down to `upTo + 1` one per timer tick, so resuming a deep camp is instant. */
+export function warmLayouts(pyramid: Pyramid, upTo: number, signal?: AbortSignal) {
+  let i = 0;
+  const last = Math.min(pyramid.floorCount - 1, upTo + 1);
+  const next = () => {
+    if (signal?.aborted || i > last) return;
+    layoutFor(pyramid, i++);
+    setTimeout(next, 0);
+  };
+  setTimeout(next, 0);
 }

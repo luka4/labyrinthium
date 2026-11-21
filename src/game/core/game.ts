@@ -1,5 +1,6 @@
 import type { ArchProfileId } from './architecture';
-import { DIRS, floorSeed, type Floor } from './floor';
+import { WADE, releasePending, sandLevel, startCollapse, tickCollapse, COVER, type CollapseRun } from './collapse';
+import { DIRS, floorSeed, type Floor, type Grid, type TrapKind } from './floor';
 import { floorFor } from './generate';
 import {
   BAG_SIZE,
@@ -16,6 +17,9 @@ import {
   type FixtureKind,
   type ItemKind,
 } from './lights';
+import { bfsFrom } from './graph';
+import { emit, lightSpare, setHand } from './runtime';
+import { LAND_STUN, pressPlate, resolveLanding, tickTraps } from './traps';
 import { clearLine, computeLight } from './vision';
 
 /**
@@ -33,20 +37,37 @@ export type Pyramid = {
   floorCount: number;
   /** which architecture profile builds its floors */
   architecture: ArchProfileId;
-  /** a camp on every floor whose 1-based number is divisible by N (the basement may be one); 0 = no camps */
-  campEvery: number;
+  /** 0-based camp floors, ascending (the basement may be one) */
+  camps: readonly number[];
 };
 
-/** escaped: the artifact on the basement floor was taken */
-export type Status = 'playing' | 'descending' | 'burntOut' | 'escaped';
+/**
+ * descending: on the stairs; falling: through a trapdoor (`continue` lands you below);
+ * buried: sand closed every way down (`retry`); escaped: the artifact on the basement floor was taken.
+ */
+export type Status = 'playing' | 'descending' | 'falling' | 'burntOut' | 'buried' | 'escaped';
 
 /** What the UI may react to (captions, haptics). Only the last EVENT_LOG are kept. */
 export type GameEvent = {
   seq: number;
-  type: 'pickup' | 'refill' | 'lit' | 'bagFull' | 'autoLight' | 'swap' | 'lowLight';
-  kind: ItemKind | FixtureKind;
+  type:
+    | 'pickup'
+    | 'refill'
+    | 'lit'
+    | 'bagFull'
+    | 'autoLight'
+    | 'swap'
+    | 'lowLight'
+    | 'plate'
+    | 'trapFired'
+    | 'hit'
+    | 'fell'
+    | 'quake'
+    | 'sandNear'
+    | 'sealed'
+    | 'buriedItem';
+  kind: ItemKind | FixtureKind | TrapKind | null;
 };
-const EVENT_LOG = 8;
 
 /** Something lying on the floor: a light source with its seconds, or an oil jar. */
 export type Lying = { kind: ItemKind; left: number };
@@ -59,6 +80,29 @@ export type GameState = {
   floorIndex: number;
   floor: Floor;
   pos: number;
+  /** the tile before the last move (where a block pushes you back to) */
+  prevPos: number;
+  /** per-run copies of the floor's masks: traps and the collapse change them; core reads these, never the floor's */
+  grid: Grid;
+  /** per trap: 0 armed, 1 pressed, 2 fired, 3 jammed or shut */
+  trapPhase: Uint8Array;
+  /** per trap: seconds to fire (pressed) or since fired (sandfall) */
+  trapTimer: Float32Array;
+  collapse: CollapseRun | null;
+  /** live collapse sand per tile, 0..255 */
+  sand: Uint8Array;
+  /** sand as last seen (memory shows what you saw) */
+  seenSand: Uint8Array;
+  /** sandfall sand per tile: wading and burying, never blocks */
+  localSand: Uint8Array;
+  /** an opaque tile changed: light must be recomputed */
+  opaqueDirty: boolean;
+  /** a tile turned solid: check that a way down is left */
+  solidDirty: boolean;
+  /** the tile you landed on after a fall, or -1 */
+  landing: number;
+  /** floors left through a trapdoor this run (a stars hook for task 05) */
+  skipped: number;
   /** the source in your hand; left <= 0 means embers: you still hold the burnt-out source */
   hand: Carried;
   bag: Carried[];
@@ -98,6 +142,12 @@ export type GameState = {
   lowWarned: boolean;
 };
 
+export type StartOptions = {
+  /** a trapdoor fall: the world point (floor centre = 0,0) you drop to */
+  landing?: { x: number; y: number };
+  skipped?: number;
+};
+
 export type Action =
   | { type: 'move'; dir: Direction }
   | { type: 'tick'; seconds: number }
@@ -107,9 +157,9 @@ export type Action =
 
 export { floorSeed };
 
-/** Camps save progress and refill the light: every floor whose 1-based number divides by `campEvery`. */
+/** Camps save progress and refill the light: the floors listed in `pyramid.camps`. */
 export function isCampFloor(pyramid: Pyramid, floorIndex: number): boolean {
-  return pyramid.campEvery > 0 && floorIndex > 0 && (floorIndex + 1) % pyramid.campEvery === 0;
+  return floorIndex > 0 && pyramid.camps.includes(floorIndex);
 }
 
 /** The floor a burnt-out torch sends you back to: the last camp at or above this floor, or the top floor. */
@@ -124,7 +174,15 @@ export function isBasement(pyramid: Pyramid, floorIndex: number): boolean {
 
 export const startHand = (): Carried => ({ kind: 'torch', left: CARRY.torch.seconds });
 
-export function startFloor(pyramid: Pyramid, floorIndex: number, hand: Carried = startHand(), bag: Carried[] = [], steps = 0, ember = 0): GameState {
+export function startFloor(
+  pyramid: Pyramid,
+  floorIndex: number,
+  hand: Carried = startHand(),
+  bag: Carried[] = [],
+  steps = 0,
+  ember = 0,
+  opts: StartOptions = {},
+): GameState {
   const floor = floorFor(pyramid, floorIndex);
   const tiles = floor.size * floor.size;
   const items = new Map<number, Lying>();
@@ -136,6 +194,18 @@ export function startFloor(pyramid: Pyramid, floorIndex: number, hand: Carried =
     floorIndex,
     floor,
     pos: floor.start,
+    prevPos: floor.start,
+    grid: { size: floor.size, solid: floor.solid.slice(), opaque: floor.opaque.slice() },
+    trapPhase: new Uint8Array(floor.traps.length),
+    trapTimer: new Float32Array(floor.traps.length),
+    collapse: startCollapse(floor.collapse),
+    sand: new Uint8Array(tiles),
+    seenSand: new Uint8Array(tiles),
+    localSand: new Uint8Array(tiles),
+    opaqueDirty: false,
+    solidDirty: false,
+    landing: -1,
+    skipped: opts.skipped ?? 0,
     hand: { ...hand },
     bag: bag.map((b) => ({ ...b })),
     ember,
@@ -160,19 +230,18 @@ export function startFloor(pyramid: Pyramid, floorIndex: number, hand: Carried =
     lowWarned: false,
   };
   state.walkedAt[floor.start] = 0;
+  if (opts.landing) {
+    const land = resolveLanding(floor, opts.landing);
+    if (land >= 0) {
+      state.pos = state.prevPos = land;
+      state.landing = land;
+      state.cooldown = LAND_STUN;
+      state.walkedAt[land] = 0;
+      state.walkedAt[floor.start] = -1;
+    }
+  }
   relight(state, true);
   return state;
-}
-
-function emit(s: GameState, type: GameEvent['type'], kind: GameEvent['kind']) {
-  s.events.push({ seq: ++s.eventSeq, type, kind });
-  if (s.events.length > EVENT_LOG) s.events.shift();
-}
-
-function setHand(s: GameState, hand: Carried) {
-  s.hand = hand;
-  s.ember = 0;
-  s.lowWarned = false;
 }
 
 /**
@@ -180,12 +249,18 @@ function setHand(s: GameState, hand: Carried) {
  * fixture that lit, changed radius or went out, or a move. Never per frame by default.
  */
 function relight(s: GameState, moved: boolean) {
-  const { floor } = s;
+  const { floor, grid } = s;
+  if (s.opaqueDirty) {
+    // a wall appeared (a block, a portcullis, sand to the ceiling): light and sight change
+    s.opaqueDirty = false;
+    s.handR = -1;
+    s.fixedDirty = true;
+  }
   const r = s.hand.left > 0 ? radiusOf(CARRY[s.hand.kind], s.hand.left) : EMBER.radius;
   const q = radiusQ(r);
   const handChanged = moved || q !== s.handR;
   if (handChanged) {
-    computeLight(floor, s.pos, q, s.hand.left > 0 ? CARRY[s.hand.kind].falloff : EMBER.falloff, s.lightHand);
+    computeLight(grid, s.pos, q, s.hand.left > 0 ? CARRY[s.hand.kind].falloff : EMBER.falloff, s.lightHand);
     s.handR = q;
   }
   const dirty = s.fixedDirty;
@@ -196,7 +271,7 @@ function relight(s: GameState, moved: boolean) {
       if (left <= 0) return;
       const fr = radiusQ(fixtureRadius(f.kind, left));
       s.fixtureR[i] = fr;
-      computeLight(floor, f.tile, fr, FIXTURE[f.kind].falloff, s.lightFixed, true);
+      computeLight(grid, f.tile, fr, FIXTURE[f.kind].falloff, s.lightFixed, true);
     });
     s.fixedDirty = false;
   }
@@ -213,13 +288,16 @@ function relight(s: GameState, moved: boolean) {
       }
       const x = i % size;
       const y = (i - x) / size;
-      s.lightSeen[i] = Math.abs(x - px) <= FIXED_SIGHT && Math.abs(y - py) <= FIXED_SIGHT && clearLine(floor, px, py, x, y) ? v : 0;
+      s.lightSeen[i] = Math.abs(x - px) <= FIXED_SIGHT && Math.abs(y - py) <= FIXED_SIGHT && clearLine(grid, px, py, x, y) ? v : 0;
     }
   }
   for (let i = 0; i < s.light.length; i++) {
     const v = Math.max(s.lightHand[i], s.lightSeen[i]);
     s.light[i] = v;
-    if (v > 0) s.seenAt[i] = s.trail;
+    if (v > 0) {
+      s.seenAt[i] = s.trail;
+      s.seenSand[i] = Math.max(s.sand[i], s.localSand[i]);
+    }
   }
 }
 
@@ -290,15 +368,7 @@ function burn(s: GameState, dt: number) {
     h.left -= dt;
     if (h.left <= 0) {
       h.left = 0;
-      let best = -1;
-      s.bag.forEach((b, i) => {
-        if (best < 0 || b.left > s.bag[best].left) best = i;
-      });
-      if (best >= 0) {
-        const next = s.bag.splice(best, 1)[0];
-        setHand(s, next);
-        emit(s, 'autoLight', next.kind);
-      }
+      lightSpare(s);
     } else if (h.left <= LOW_SECONDS && !s.lowWarned && !s.bag.length) {
       s.lowWarned = true;
       emit(s, 'lowLight', h.kind);
@@ -316,20 +386,33 @@ function burn(s: GameState, dt: number) {
   });
 }
 
+/** Is any way down left (the stairs, or a trapdoor that is still armed)? */
+function wayDownLeft(s: GameState): boolean {
+  const dist = new Int32Array(s.grid.size * s.grid.size);
+  bfsFrom(s.grid.solid, s.grid.size, s.pos, dist);
+  if (dist[s.floor.stairs] >= 0) return true;
+  const { traps } = s.floor;
+  for (let k = 0; k < traps.length; k++) if (traps[k].kind === 'trapdoor' && s.trapPhase[k] === 0 && dist[traps[k].tile] >= 0) return true;
+  return false;
+}
+
 /** Applies one action. Mutates and returns the state, or returns a new state on a floor change. */
 export function step(s: GameState, action: Action): GameState {
   switch (action.type) {
     case 'move': {
       if (s.status !== 'playing' || s.cooldown > 0) return s;
-      const { size, solid } = s.floor;
+      const { size, solid } = s.grid;
       const [dx, dy] = DIRS[action.dir];
       const x = (s.pos % size) + dx;
       const y = Math.floor(s.pos / size) + dy;
       const next = y * size + x;
       if (x < 0 || y < 0 || x >= size || y >= size || solid[next]) return s;
-      // carry the unused part of the last tick over: an exact cadence at any frame rate
-      s.cooldown = (s.cooldown > -STEP_SECONDS ? s.cooldown : 0) + STEP_SECONDS;
+      // carry the unused part of the last tick over: an exact cadence at any frame rate; wading is slower
+      const wade = sandLevel(s, next) >= COVER ? WADE : 1;
+      s.cooldown = (s.cooldown > -STEP_SECONDS ? s.cooldown : 0) + STEP_SECONDS * wade;
+      s.prevPos = s.pos;
       s.pos = next;
+      releasePending(s);
       s.steps++;
       s.burning = true;
       s.trail++;
@@ -338,6 +421,9 @@ export function step(s: GameState, action: Action): GameState {
       lightFixtures(s);
       if (next === s.floor.stairs) {
         s.status = isBasement(s.pyramid, s.floorIndex) ? 'escaped' : 'descending';
+      } else {
+        const k = s.floor.trapAt[next];
+        if (k >= 0 && s.trapPhase[k] === 0) pressPlate(s, k, 'player');
       }
       relight(s, true);
       return s;
@@ -347,7 +433,21 @@ export function step(s: GameState, action: Action): GameState {
       s.cooldown = Math.max(-STEP_SECONDS, s.cooldown - action.seconds);
       if (!s.burning) return s;
       burn(s, action.seconds);
-      relight(s, false);
+      if (s.status !== 'playing') {
+        relight(s, false);
+        return s;
+      }
+      const from = s.pos;
+      tickTraps(s, action.seconds);
+      tickCollapse(s, action.seconds);
+      if (s.solidDirty) {
+        s.solidDirty = false;
+        if (s.status === 'playing' && !wayDownLeft(s)) {
+          s.status = 'buried';
+          emit(s, 'sealed', null);
+        }
+      }
+      relight(s, s.pos !== from);
       return s;
     }
     case 'swap': {
@@ -361,6 +461,13 @@ export function step(s: GameState, action: Action): GameState {
       return s;
     }
     case 'continue': {
+      if (s.status === 'falling') {
+        const trap = s.floor.traps.find((t, k) => t.kind === 'trapdoor' && t.tile === s.pos && s.trapPhase[k] === 2);
+        return startFloor(s.pyramid, s.floorIndex + 1, s.hand, s.bag, s.steps, s.hand.left > 0 ? 0 : s.ember, {
+          landing: trap?.landingWorld ?? undefined,
+          skipped: s.skipped,
+        });
+      }
       if (s.status !== 'descending') return s;
       const next = s.floorIndex + 1;
       let hand = s.hand;
@@ -369,10 +476,10 @@ export function step(s: GameState, action: Action): GameState {
         const kind = CARRY[hand.kind].seconds >= CARRY.torch.seconds ? hand.kind : 'torch';
         hand = { kind, left: CARRY[kind].seconds };
       }
-      return startFloor(s.pyramid, next, hand, s.bag, s.steps, hand.left > 0 ? 0 : s.ember);
+      return startFloor(s.pyramid, next, hand, s.bag, s.steps, hand.left > 0 ? 0 : s.ember, { skipped: s.skipped });
     }
     case 'retry': {
-      if (s.status !== 'burntOut') return s;
+      if (s.status !== 'burntOut' && s.status !== 'buried') return s;
       return startFloor(s.pyramid, lastCamp(s.pyramid, s.floorIndex), startHand(), [], s.steps);
     }
   }

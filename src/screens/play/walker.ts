@@ -1,4 +1,5 @@
 import { step, type Direction, type GameState } from '../../game/core/game';
+import { COVER, sandLevel } from '../../game/core/collapse';
 import { holdDir, runDir } from '../../game/core/walk';
 
 /**
@@ -29,6 +30,12 @@ export function createWalker(onBump: () => void): Walker {
   let run: Direction | null = null;
   /** the last press has not moved yet: a wall bump is feedback only for it */
   let fresh = false;
+
+  /** armed traps and covered sand are never walked into by auto-walk (a swipe still can) */
+  const avoid = (s: GameState) => (tile: number) => {
+    const k = s.floor.trapAt[tile];
+    return (k >= 0 && s.trapPhase[k] === 0) || sandLevel(s, tile) >= COVER;
+  };
 
   const interesting = (s: GameState) => {
     const { size } = s.floor;
@@ -74,10 +81,10 @@ export function createWalker(onBump: () => void): Walker {
         dir = queued;
         queued = null;
       } else if (run !== null) {
-        dir = runDir(s.floor, s.pos, run, interesting(s));
+        dir = runDir(s.floor, s.grid, s.pos, run, interesting(s), avoid(s));
         run = dir;
       } else if (held !== null) {
-        dir = holdDir(s.floor, s.pos, held);
+        dir = holdDir(s.grid, s.pos, held, avoid(s));
         held = dir;
       }
       if (dir === null) return s;

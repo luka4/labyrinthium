@@ -3,7 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-nat
 
 import { router } from 'expo-router';
 
-import { campFloorNumbers, PYRAMIDS, SEALS } from '../game/core/pyramids';
+import { PYRAMIDS, SEALS } from '../game/core/pyramids';
 import { sealsFilled, useProgress } from '../state/progress';
 import { useSettings, type Controls, type MotionSetting } from '../state/settings';
 import { Button } from '../ui/Button';
@@ -16,6 +16,7 @@ export default function SettingsScreen() {
   const settings = useSettings();
   const artifacts = useProgress((s) => s.artifacts);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [devFloor, setDevFloor] = useState(1);
 
   return (
     <Screen>
@@ -74,19 +75,20 @@ export default function SettingsScreen() {
                 <Button key={n} label={`${n}`} style={styles.devButton} onPress={() => useProgress.getState().devGrantArtifacts(n)} />
               ))}
             </View>
-            <Text style={type.caption}>Start Egypt at a camp (saves the camp, then opens the pyramid):</Text>
+            <Text style={type.caption}>Start Egypt at a floor (saves it as the checkpoint, then opens the pyramid):</Text>
             <View style={styles.devRow}>
-              {campFloorNumbers(PYRAMIDS.egypt).map((floor) => (
-                <Button
-                  key={floor}
-                  label={`Egypt: camp at floor ${floor}`}
-                  style={styles.devButton}
-                  onPress={() => {
-                    useProgress.getState().devReachCamp('egypt', floor - 1);
-                    router.push({ pathname: '/pyramid/[id]', params: { id: 'egypt' } });
-                  }}
-                />
-              ))}
+              <Button label="−" style={styles.devButton} onPress={() => setDevFloor((n) => Math.max(1, n - 1))} />
+              <Text style={[type.heading, styles.devFloor]}>{devFloor}</Text>
+              <Button label="+" style={styles.devButton} onPress={() => setDevFloor((n) => Math.min(PYRAMIDS.egypt.floorCount, n + 1))} />
+              <Button
+                variant="primary"
+                label="Go"
+                style={styles.devButton}
+                onPress={() => {
+                  useProgress.getState().devReachCamp('egypt', devFloor - 1);
+                  router.push({ pathname: '/pyramid/[id]', params: { id: 'egypt' } });
+                }}
+              />
             </View>
           </Section>
         )}
@@ -192,5 +194,6 @@ const styles = StyleSheet.create({
   segmentText: { color: colors.muted, fontFamily: fonts.bodyMedium, fontSize: 14 },
   segmentTextOn: { color: colors.onGold },
   devRow: { flexDirection: 'row', gap: space.sm },
+  devFloor: { flex: 1, textAlign: 'center', alignSelf: 'center' },
   devButton: { flex: 1, alignSelf: 'auto', paddingHorizontal: 0 },
 });

@@ -1,3 +1,4 @@
+import { EGYPT_CAMPS } from './egypt';
 import type { Pyramid } from './game';
 
 /**
@@ -24,7 +25,7 @@ export type PyramidInfo = Pyramid & {
 /** The four pyramids whose artifacts fill the seals of the Black Pyramid's door, in door order. */
 export const SEALS: readonly PyramidId[] = ['egypt', 'maya', 'cambodia', 'china'];
 
-const BASE = { floorCount: 5, architecture: 'generic', campEvery: 5, requires: [] } as const;
+const BASE = { floorCount: 5, architecture: 'generic', camps: [4], requires: [] } as const;
 
 export const PYRAMIDS: Record<PyramidId, PyramidInfo> = {
   egypt: {
@@ -36,7 +37,8 @@ export const PYRAMIDS: Record<PyramidId, PyramidInfo> = {
     power: 'Briefly points the way to the stairs. Strongest in Cambodia.',
     color: '#d6b066',
     top: 'capstone',
-    floorCount: 10,
+    floorCount: 25,
+    camps: EGYPT_CAMPS,
     architecture: 'egypt',
   },
   maya: {
@@ -87,10 +89,7 @@ export function isPyramidId(id: unknown): id is PyramidId {
   return typeof id === 'string' && id in PYRAMIDS;
 }
 
-/** Camp floors as 1-based numbers, for display ("camps at 3 and 5"). */
+/** Camp floors as 1-based numbers, for display ("camps at 5, 10 and 14"). */
 export function campFloorNumbers(p: Pyramid): number[] {
-  const out: number[] = [];
-  if (p.campEvery <= 0) return out;
-  for (let n = p.campEvery; n <= p.floorCount; n += p.campEvery) out.push(n);
-  return out;
+  return p.camps.map((i) => i + 1);
 }

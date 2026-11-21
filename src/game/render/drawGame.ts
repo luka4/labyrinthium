@@ -1,8 +1,12 @@
-import { BlendMode, ClipOp, FilterMode, MipmapMode, Skia, type SkCanvas, type SkImage } from '@shopify/react-native-skia';
+import { BlendMode, ClipOp, FilterMode, MipmapMode, Skia, type SkCanvas } from '@shopify/react-native-skia';
 
 import { isBasement, type GameState } from '../core/game';
 import { STEP_SECONDS } from '../core/lights';
 import { diamond, fill, glow, hash01, rgba } from './art';
+import type { FloorArt } from './floorArt';
+import { createSandRenderer, type SandRenderer } from './drawSand';
+import { drawTraps } from './drawTraps';
+import type { FloorTheme } from './themes';
 import { drawFixtureBody, drawFlame, drawGlint, drawItemBody, fixtureFlames, flameAnchor, softGlow } from './drawItems';
 import type { LightMask } from './lightMask';
 import { EMBER_STYLE, LIGHT_STYLE, flicker } from './lightStyle';
@@ -28,7 +32,27 @@ export type Frame = {
   time: number;
   /** tile the player stood on before the last move (for the walking animation) */
   prevPos: number;
+  /** 0..1 while a trapdoor opens under you (status `falling`) */
+  fall: number;
 };
+
+/** What the board draws besides the game state: the floor's art, the light mask, the sand and the palette. */
+export type Layers = { art: FloorArt | null; mask: LightMask; sand: SandRenderer; theme: FloorTheme };
+
+/**
+ * The tiles to render around the camera: the view plus `margin` tiles, clamped to the floor.
+ * One helper for the light mask, the sand layer and the art chunks.
+ */
+export function viewWindow(view: Pick<View, 'camX' | 'camY' | 'board' | 'tilePx'>, size: number, margin: number) {
+  const half = view.board / 2 / view.tilePx;
+  const x0 = Math.max(0, Math.floor(view.camX - half) - margin);
+  const y0 = Math.max(0, Math.floor(view.camY - half) - margin);
+  const x1 = Math.min(size - 1, Math.ceil(view.camX + half) + margin);
+  const y1 = Math.min(size - 1, Math.ceil(view.camY + half) + margin);
+  return { x0, y0, x1, y1, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+export { createSandRenderer };
 
 const layerPaint = Skia.Paint();
 const maskPaint = Skia.Paint();
@@ -37,10 +61,10 @@ maskPaint.setBlendMode(BlendMode.DstIn);
 /** The most coloured fixture glows drawn per frame. */
 const MAX_FIXED_TINTS = 10;
 
-export function drawGame(canvas: SkCanvas, s: GameState, art: SkImage | null, mask: LightMask, view: View, frame: Frame) {
+export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: View, frame: Frame) {
+  const { art, mask, sand, theme } = layers;
   const { size, stairs } = s.floor;
   const { board, tilePx: t } = view;
-  const world = size * t;
   const time = frame.time;
   const prog = Math.min(1, Math.max(0, 1 - s.cooldown / STEP_SECONDS));
 
@@ -74,8 +98,10 @@ export function drawGame(canvas: SkCanvas, s: GameState, art: SkImage | null, ma
   const cx = (i: number) => ((i % size) + 0.5) * t;
   const cy = (i: number) => (Math.floor(i / size) + 0.5) * t;
 
+  const win = viewWindow(view, size, 2);
   canvas.saveLayer(layerPaint);
-  if (art) canvas.drawImageRectOptions(art, { x: 0, y: 0, width: art.width(), height: art.height() }, { x: 0, y: 0, width: world, height: world }, FilterMode.Linear, MipmapMode.None);
+  art?.draw(canvas, win, t);
+  drawTraps(canvas, s, theme, t, win, { time, fall: frame.fall });
 
   // things lying on the floor and the bodies of fixtures: they sit under the light mask
   for (const [i, it] of s.items) {
@@ -89,11 +115,12 @@ export function drawGame(canvas: SkCanvas, s: GameState, art: SkImage | null, ma
     // sconces sit on the wall face above their tile: pass the tile's top edge
     drawFixtureBody(canvas, f.kind, cx(f.tile), f.kind === 'sconce' ? (Math.floor(f.tile / size)) * t : cy(f.tile), t, lit);
   });
+  sand.draw(canvas, s, win, t, time);
   if (isBasement(s.pyramid, s.floorIndex)) artifact(canvas, cx(stairs), cy(stairs), t, handF);
   else glow(canvas, cx(stairs), cy(stairs), t * 1.8, 0.35, '#5f86e8');
 
-  const image = mask.render(s, prog, handF, 1);
-  if (image) canvas.drawImageRectOptions(image, { x: 0, y: 0, width: mask.px, height: mask.px }, { x: 0, y: 0, width: world, height: world }, FilterMode.Linear, MipmapMode.None, maskPaint);
+  const lit = mask.render(s, prog, handF, 1, win);
+  if (lit) canvas.drawImageRectOptions(lit.image, { x: 0, y: 0, width: lit.w * 2, height: lit.h * 2 }, { x: lit.x0 * t, y: lit.y0 * t, width: lit.w * t, height: lit.h * t }, FilterMode.Linear, MipmapMode.None, maskPaint);
 
   // coloured light on whatever the mask let through: the hand light, then each lit fixture
   const handReach = (s.handR + 1) * t * handF;
@@ -121,7 +148,10 @@ export function drawGame(canvas: SkCanvas, s: GameState, art: SkImage | null, ma
     });
   });
 
-  player(canvas, s, px, py, t, style.color, handF, frame.prevPos === s.pos ? 0 : Math.sign(tx - fx) * (1 - prog), time);
+  // dropping through a trapdoor: smaller and darker into the pit
+  const sink = s.status === 'falling' ? 1 - 0.75 * frame.fall : 1;
+  player(canvas, s, px, py + (1 - sink) * t * 0.2, t * sink, style.color, handF, frame.prevPos === s.pos ? 0 : Math.sign(tx - fx) * (1 - prog), time);
+  if (sink < 1) canvas.drawCircle(px, py, t * 0.5 * (1 - sink), fill(rgba('#000000', 0.5 * (1 - sink))));
   canvas.restore();
 }
 

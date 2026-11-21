@@ -1,4 +1,5 @@
 import type { Lattice, Room, RoomKind, Spot } from './floor';
+import { EGYPT_ROWS, type EgyptRow } from './egypt';
 import type { Rng } from './rng';
 
 /**
@@ -23,6 +24,14 @@ export type ArchProfile = {
   halls: (floorIndex: number) => number;
   /** quota of 1x3 galleries on the tree */
   galleries: (floorIndex: number) => number;
+  /** optional loop rate by floor index; absent = the linear ramp of `loops` */
+  loopRate?: (floorIndex: number) => number;
+  /** most wall sconces on a floor */
+  sconceCap: (floorIndex: number) => number;
+  /** pressure-plate trap targets by floor index (traps.ts); absent = none */
+  traps?: (floorIndex: number) => EgyptRow['traps'];
+  /** the collapse of the floor above (collapse.ts); absent or null = none */
+  collapse?: (floorIndex: number) => EgyptRow['collapse'];
   /** weights for dead-end rooms */
   leafRooms: Partial<Record<RoomKind, number>>;
   /** chance a site with 3+ ports becomes a chamber */
@@ -36,25 +45,59 @@ export type ArchProfile = {
   hooks?: Array<(ctx: GenContext) => void>;
 };
 
+/** The linear loop ramp of plan 01 (floors 1-10 of Egypt, every floor of the other profiles). */
+export function linearLoopRate(loops: ArchProfile['loops'], floorIndex: number): number {
+  const { fromFloor, maxRate, atFloor } = loops;
+  return floorIndex < fromFloor ? 0 : (maxRate * Math.min(floorIndex - fromFloor + 1, atFloor - fromFloor + 1)) / (atFloor - fromFloor + 1);
+}
+
 const EGYPT: ArchProfile = {
   id: 'egypt',
-  sites: [3, 4, 5, 5, 6, 6, 7, 7, 8, 8],
+  sites: EGYPT_ROWS.map((r) => r.sites),
   span: [3, 5],
   straightness: 0.55,
   loops: { fromFloor: 3, maxRate: 0.12, atFloor: 9 },
-  halls: (i) => (i < 2 ? 0 : i < 6 ? 1 : 2),
-  galleries: (i) => (i < 3 ? 0 : 1),
+  loopRate: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].loops ?? linearLoopRate(EGYPT.loops, i),
+  sconceCap: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].sconceCap,
+  traps: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].traps,
+  collapse: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].collapse,
+  halls: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].halls,
+  galleries: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].galleries,
   leafRooms: { chamber: 5, magazines: 3, shrine: 2 },
   junctionRoom: 0.3,
   nicheRate: 0.06,
-  lights: { secPerTile: [0.3, 0.28, 0.26, 0.24, 0.22, 0.2, 0.18, 0.16, 0.15, 0.14] },
+  lights: { secPerTile: EGYPT_ROWS.map((r) => r.secPerTile) },
   basementRoom: 'burial',
 };
 
 const PROFILES: Record<ArchProfileId, ArchProfile> = {
   egypt: EGYPT,
-  generic: { ...EGYPT, id: 'generic', sites: [3, 4, 5, 6, 7], loops: { fromFloor: 2, maxRate: 0.1, atFloor: 4 } },
-  black: { ...EGYPT, id: 'black', sites: [4, 5, 6, 7, 8], loops: { fromFloor: 1, maxRate: 0.12, atFloor: 4 } },
+  generic: {
+    ...EGYPT,
+    id: 'generic',
+    sites: [3, 4, 5, 6, 7],
+    loops: { fromFloor: 2, maxRate: 0.1, atFloor: 4 },
+    halls: (i) => (i < 2 ? 0 : i < 6 ? 1 : 2),
+    galleries: (i) => (i < 3 ? 0 : 1),
+    lights: { secPerTile: [0.3, 0.28, 0.26, 0.24, 0.22, 0.2, 0.18, 0.16, 0.15, 0.14] },
+    loopRate: undefined,
+    sconceCap: () => 8,
+    traps: undefined,
+    collapse: undefined,
+  },
+  black: {
+    ...EGYPT,
+    id: 'black',
+    sites: [4, 5, 6, 7, 8],
+    loops: { fromFloor: 1, maxRate: 0.12, atFloor: 4 },
+    halls: (i) => (i < 2 ? 0 : i < 6 ? 1 : 2),
+    galleries: (i) => (i < 3 ? 0 : 1),
+    lights: { secPerTile: [0.3, 0.28, 0.26, 0.24, 0.22, 0.2, 0.18, 0.16, 0.15, 0.14] },
+    loopRate: undefined,
+    sconceCap: () => 8,
+    traps: undefined,
+    collapse: undefined,
+  },
 };
 
 export function profileFor(id: ArchProfileId): ArchProfile {
@@ -74,6 +117,8 @@ export type GenSpec = {
   basement: boolean;
   /** a camp floor: an eternal brazier burns beside the landing */
   camp?: boolean;
+  /** the next floor is a camp: no trapdoor drops you there (traps.ts) */
+  nextIsCamp?: boolean;
   profile: ArchProfileId;
   /** the previous floor's stairs in world coordinates (floor centre = 0,0); null on the top floor */
   arrivalWorld: { x: number; y: number } | null;

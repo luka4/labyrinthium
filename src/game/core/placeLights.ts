@@ -238,7 +238,7 @@ export function placeLights(a: {
 
   // sconces: on the north wall face, middle of long passages or just inside doors of rooms
   const sconces: Fixture[] = [];
-  const nSconce = floor < 2 ? 0 : Math.min(8, Math.floor(open / 90));
+  const nSconce = floor < 2 ? 0 : Math.min(profile.sconceCap(floorIndex), Math.floor(open / 90));
   if (nSconce > 0) {
     const cs: number[] = [];
     const wallRun = (x: number, y: number, step: number) => {

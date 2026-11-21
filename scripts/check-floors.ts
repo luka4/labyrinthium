@@ -8,12 +8,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { profileFor } from '../src/game/core/architecture';
-import { DIRS, TILE, distancesFrom, type Floor, type RoomKind } from '../src/game/core/floor';
-import { generateFloor } from '../src/game/core/generate';
-import { floorFor } from '../src/game/core/generate';
+import { DIRS, TILE, distancesFrom, type Floor, type RoomKind, type TrapKind } from '../src/game/core/floor';
+import { addFeatures, floorFor, generateFloor, generateLayout, layoutFor, specFor } from '../src/game/core/generate';
 import { CARRY } from '../src/game/core/lights';
 import { runLightChecks } from './check-light-rules';
-import { floorSeed, isCampFloor, lastCamp } from '../src/game/core/game';
+import { KINDS, checkTraps, featHash, type TrapStats } from './check-traps';
+import { runTrapRules } from './check-trap-rules';
+import { floorSeed, isCampFloor, lastCamp, type Pyramid } from '../src/game/core/game';
 import { PYRAMIDS, SEALS, type PyramidId } from '../src/game/core/pyramids';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -35,6 +36,16 @@ const GLYPH: Record<number, string> = {
 
 const ITEM_GLYPH: Record<string, string> = { smallTorch: 't', torch: 'T', bigTorch: 'B', lamp: 'l', candle: 'i', oilJar: 'o' };
 
+/** block X, portcullis plate P and its port =, sandfall $, trapdoor v (b stays the bench, s the sconce) */
+const TRAP_GLYPH: Record<TrapKind, string> = { block: 'X', portcullis: 'P', sandfall: '$', trapdoor: 'v' };
+
+/** --sand: the sand rank in deciles 0-9 over the ranked part, '.' elsewhere */
+function sandDigit(f: Floor, i: number): string | null {
+  if (!args.includes('--sand') || !f.collapse) return null;
+  const r = f.collapse.rank[i];
+  return r < 0 ? null : String(Math.min(9, Math.floor((r * 10) / f.collapse.order.length)));
+}
+
 function ascii(f: Floor): string {
   const rows: string[] = [];
   for (let y = 0; y < f.size; y++) {
@@ -43,7 +54,27 @@ function ascii(f: Floor): string {
       const i = y * f.size + x;
       const it = f.items.find((o) => o.tile === i);
       const fx = f.fixtures.find((o) => o.tile === i && o.kind !== 'brazier');
-      row += i === f.start ? '@' : it ? ITEM_GLYPH[it.kind] : fx ? (fx.kind === 'sconce' ? 's' : 'c') : i === f.stairs && f.tiles[i] === TILE.FLOOR ? 'A' : GLYPH[f.tiles[i]];
+      const tk = f.trapAt[i] >= 0 ? f.traps[f.trapAt[i]] : null;
+      const port = f.traps.some((t) => t.kind === 'portcullis' && t.target === i);
+      const sand = sandDigit ? sandDigit(f, i) : null;
+      row +=
+        i === f.start
+          ? '@'
+          : tk
+            ? TRAP_GLYPH[tk.kind]
+            : port
+              ? '='
+              : it
+                ? ITEM_GLYPH[it.kind]
+                : fx
+                  ? fx.kind === 'sconce'
+                    ? 's'
+                    : 'c'
+                  : sand !== null && !f.solid[i]
+                    ? sand
+                    : i === f.stairs && f.tiles[i] === TILE.FLOOR
+                      ? 'A'
+                      : GLYPH[f.tiles[i]];
     }
     rows.push(row);
   }
@@ -69,7 +100,7 @@ if (args[0] === '--ascii') {
   const id = (args[1] ?? 'egypt') as PyramidId;
   const index = Number(args[2] ?? 1) - 1;
   const f = floorFor(PYRAMIDS[id], index);
-  console.log(`${id} floor ${index + 1}: size ${f.size}, rooms ${f.rooms.length}, loops ${f.loops}, items ${f.items.length} fixtures ${f.fixtures.length}`);
+  console.log(`${id} floor ${index + 1}: size ${f.size}, rooms ${f.rooms.length}, loops ${f.loops}, items ${f.items.length} fixtures ${f.fixtures.length}, traps ${f.traps.map((t) => t.kind).join(',') || '-'}, collapse ${f.collapse ? `cap ${f.collapse.cap}` : '-'}`);
   console.log(ascii(f));
   console.log(f.rooms.map((r) => `${r.id}:${r.kind}`).join(' '));
   process.exit(0);
@@ -226,6 +257,9 @@ const old: Record<string, string> = (() => {
 console.log('pyramid floor size open rooms(by kind) mainPath loops items+fixtures run room% thick ms');
 let genMs = 0;
 let genCount = 0;
+const newStats = (): Record<TrapKind, TrapStats> => ({ block: { target: 0, placed: 0 }, portcullis: { target: 0, placed: 0 }, sandfall: { target: 0, placed: 0 }, trapdoor: { target: 0, placed: 0 } });
+const fixedStats = newStats();
+const fuzzStats: Array<Record<TrapKind, TrapStats>> = Array.from({ length: 25 }, newStats);
 for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
   const p = PYRAMIDS[id];
   if (p.floorCount > profileFor(p.architecture).sites.length) fail(`${id}: floorCount ${p.floorCount} exceeds the size table`);
@@ -233,23 +267,17 @@ for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
     const label = `${id} floor ${i + 1}`;
     const t0 = performance.now();
     const f = floorFor(p, i);
-    const again = generateFloor({
-      seed: floorSeed(p, i),
-      floorIndex: i,
-      basement: i === p.floorCount - 1,
-      camp: isCampFloor(p, i),
-      profile: p.architecture,
-      arrivalWorld: i === 0 ? null : (() => {
-        const above = floorFor(p, i - 1);
-        const half = above.size >> 1;
-        return { x: (above.stairs % above.size) - half, y: Math.floor(above.stairs / above.size) - half };
-      })(),
-    });
+    const again = generateFloor(specFor(p, i), i + 1 < p.floorCount ? layoutFor(p, i + 1) : null);
     genMs += (performance.now() - t0) / 2;
     genCount++;
     const h = fnv(f);
     if (fnv(again) !== h) fail(`${label}: not deterministic`);
     snapshot[`${id}:${i}`] = h;
+    const fh = featHash(f);
+    if (featHash(again) !== fh) fail(`${label}: features not deterministic`);
+    snapshot[`${id}:${i}:feat`] = fh;
+    if (old[`${id}:${i}:feat`] && old[`${id}:${i}:feat`] !== fh && !args.includes('--update')) fail(`${label}: features snapshot changed (npm run check:floors -- --update)`);
+    checkTraps(label, p, i, f, i + 1 < p.floorCount ? floorFor(p, i + 1) : null, true, { fail, warn }, id === 'egypt' ? fixedStats : undefined);
     if (old[`${id}:${i}`] && old[`${id}:${i}`] !== h && !args.includes('--update')) fail(`${label}: snapshot changed ${old[`${id}:${i}`]} -> ${h} (npm run check:floors -- --update)`);
     const m = check(label, f, i === p.floorCount - 1, i, isCampFloor(p, i));
     const kinds = Object.entries(m.kinds)
@@ -269,34 +297,88 @@ for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
   }
 }
 
-// Egypt over many seeds: same checks with other layouts
+// Egypt over many seeds: layouts first (arrival chain), then features from the bottom up
 const egypt = PYRAMIDS.egypt;
 let loopFloors = 0;
-for (let seed = 1; seed <= 300; seed++) {
-  let world: { x: number; y: number } | null = null;
-  for (let i = 0; i < egypt.floorCount; i++) {
-    const f = generateFloor({ seed: seed * 7919 + i * 104729, floorIndex: i, basement: i === egypt.floorCount - 1, camp: isCampFloor(egypt, i), profile: 'egypt', arrivalWorld: world });
-    check(`egypt seed ${seed} floor ${i + 1}`, f, i === egypt.floorCount - 1, i, isCampFloor(egypt, i));
-    if (i < 3 && f.loops) fail(`egypt seed ${seed} floor ${i + 1}: loops on an early floor`);
-    if (seed === 1 && i >= 7 && f.loops > 0) loopFloors++;
-    world = { x: (f.stairs % f.size) - (f.size >> 1), y: Math.floor(f.stairs / f.size) - (f.size >> 1) };
-    if (failures > 40) break;
+const FUZZ_FULL = 100;
+const FUZZ_EARLY = 300;
+const fuzzT0 = performance.now();
+let fuzzFloors = 0;
+let loweredCaps = 0;
+for (let seed = 1; seed <= FUZZ_EARLY && failures <= 40; seed++) {
+  const count = seed <= FUZZ_FULL ? egypt.floorCount : 10;
+  const pyr: Pyramid = { ...egypt, id: `fuzz${seed}`, seed };
+  const layouts: ReturnType<typeof generateLayout>[] = [];
+  for (let i = 0; i <= Math.min(count, egypt.floorCount - 1); i++) {
+    let arrivalWorld: { x: number; y: number } | null = null;
+    if (i > 0) {
+      const above = layouts[i - 1];
+      arrivalWorld = { x: (above.stairs % above.size) - (above.size >> 1), y: Math.floor(above.stairs / above.size) - (above.size >> 1) };
+    }
+    layouts.push(generateLayout({ ...specFor({ ...pyr, architecture: 'egypt' }, i), seed: seed * 7919 + i * 104729, arrivalWorld }));
   }
-  if (failures > 40) break;
+  const floors: Floor[] = [];
+  for (let i = layouts.length - 1; i >= 0; i--) {
+    const spec = { ...specFor({ ...pyr, architecture: 'egypt' }, i), seed: seed * 7919 + i * 104729, arrivalWorld: null };
+    floors[i] = addFeatures(layouts[i], spec, i + 1 < layouts.length ? layouts[i + 1] : null);
+  }
+  for (let i = 0; i < count; i++) {
+    const f = floors[i];
+    const label = `egypt seed ${seed} floor ${i + 1}`;
+    check(label, f, i === egypt.floorCount - 1, i, isCampFloor(egypt, i));
+    if (checkTraps(label, pyr, i, f, i + 1 < layouts.length ? floors[i + 1] : null, false, { fail, warn }, fuzzStats[i]).lowered) loweredCaps++;
+    fuzzFloors++;
+    if (i < 3 && f.loops) fail(`${label}: loops on an early floor`);
+    if (seed === 1 && i >= 7 && i <= 9 && f.loops > 0) loopFloors++;
+  }
 }
 if (loopFloors < 2) fail('loops: fewer than 2 of egypt floors 8-10 have loop edges');
+console.log(`fuzz: ${fuzzFloors} floors in ${((performance.now() - fuzzT0) / 1000).toFixed(1)} s, collapse cap lowered on ${loweredCaps}`);
+for (let i = 0; i < 25; i++) {
+  const st = fuzzStats[i];
+  const target = KINDS.reduce((a, k) => a + st[k].target, 0);
+  const placed = KINDS.reduce((a, k) => a + st[k].placed, 0);
+  if (target >= 2 * (i < 10 ? FUZZ_EARLY : FUZZ_FULL) && placed < 0.5 * target) fail(`egypt floor ${i + 1}: fuzz placed ${placed} of ${target} traps (< 50 %)`);
+  if (target) {
+    const short = KINDS.filter((k) => st[k].placed < st[k].target).map((k) => `${k} ${st[k].placed}/${st[k].target}`);
+    if (short.length) console.log(`fuzz shortfall floor ${i + 1}: ${short.join(', ')}`);
+  }
+}
+const fixedShort = KINDS.filter((k) => fixedStats[k].placed < fixedStats[k].target).map((k) => `${k} ${fixedStats[k].placed}/${fixedStats[k].target}`);
+console.log(`fixed seed traps placed/target: ${KINDS.map((k) => `${k} ${fixedStats[k].placed}/${fixedStats[k].target}`).join(', ')}${fixedShort.length ? ' (short: ' + fixedShort.join(', ') + ')' : ''}`);
 
-runLightChecks({ fail, warn });
+runTrapRules({ fail, warn });
+runLightChecks({ fail, warn, snapshot, old, update: args.includes('--update') });
 
 // camps
 const campIndices = Array.from({ length: egypt.floorCount }, (_, i) => i).filter((i) => isCampFloor(egypt, i));
-if (campIndices.join() !== '4,9') fail(`egypt camps at ${campIndices} (want 4,9)`);
-if (lastCamp(egypt, 3) !== 0 || lastCamp(egypt, 6) !== 4 || lastCamp(egypt, 9) !== 9) fail('lastCamp values');
+if (campIndices.join() !== '4,9,13,16,19,21,23,24') fail(`egypt camps at ${campIndices} (want 4,9,13,16,19,21,23,24)`);
+if (lastCamp(egypt, 3) !== 0 || lastCamp(egypt, 6) !== 4 || lastCamp(egypt, 9) !== 9 || lastCamp(egypt, 12) !== 9 || lastCamp(egypt, 13) !== 13 || lastCamp(egypt, 24) !== 24) fail('lastCamp values');
+for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
+  const q = PYRAMIDS[id];
+  if (q.floorCount > profileFor(q.architecture).sites.length) fail(`${id}: floorCount exceeds the size table`);
+  if (q.camps.some((c, k) => c < 0 || c >= q.floorCount || (k > 0 && c <= q.camps[k - 1]))) fail(`${id}: camps not ascending and in range`);
+}
+for (let i = 0; i < egypt.floorCount; i++) {
+  const f = floorFor(egypt, i);
+  if (f.traps.some((t) => t.kind === 'trapdoor') && (isCampFloor(egypt, i + 1) || i + 1 >= egypt.floorCount - 1)) fail(`egypt floor ${i + 1}: trapdoor above a camp or the basement`);
+}
 for (const id of SEALS) if (!isCampFloor(PYRAMIDS[id], PYRAMIDS[id].floorCount - 1)) fail(`${id}: basement is not a camp`);
 
-const avg = genMs / genCount;
-console.log(`generation: ${avg.toFixed(2)} ms per floor on average`);
-if (avg > 2) warn(`generation ${avg.toFixed(2)} ms per floor (target < 2)`);
+// timing on this machine (a Redmi 9 is roughly 5-10x slower): warn above the desktop budgets
+{
+  const spec = (i: number) => specFor({ ...egypt, id: 'timing', seed: 99 }, i);
+  let t0 = performance.now();
+  const ls: ReturnType<typeof generateLayout>[] = [];
+  for (let i = 0; i < egypt.floorCount; i++) ls.push(generateLayout({ ...spec(i), arrivalWorld: i ? { x: (ls[i - 1].stairs % ls[i - 1].size) - (ls[i - 1].size >> 1), y: Math.floor(ls[i - 1].stairs / ls[i - 1].size) - (ls[i - 1].size >> 1) } : null }));
+  const chainMs = performance.now() - t0;
+  t0 = performance.now();
+  addFeatures(ls[23], spec(23), ls[24]);
+  const f24 = performance.now() - t0;
+  console.log(`generation: layout chain 1-25 ${chainMs.toFixed(0)} ms, features of floor 24 ${f24.toFixed(1)} ms, ${(genMs / genCount).toFixed(2)} ms per floor on average (full)`);
+  if (chainMs > 80) warn(`layout chain ${chainMs.toFixed(0)} ms (target < 80)`);
+  if (f24 > 12) warn(`features of floor 24 ${f24.toFixed(1)} ms (target < 12)`);
+}
 
 if (args.includes('--update')) {
   writeFileSync(SNAPSHOT, JSON.stringify(snapshot, null, 1) + '\n');

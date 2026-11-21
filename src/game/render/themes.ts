@@ -27,6 +27,12 @@ export type FloorTheme = {
   lapis: string;
   /** rooms whose wall faces carry a painted frieze */
   royal: ReadonlySet<RoomKind>;
+  /** collapse sand: light and shadow side */
+  sand: string;
+  sandDark: string;
+  /** trap plates: a darker stone set into the paving, and its lit edge */
+  granite: string;
+  graniteEdge: string;
 };
 
 const ROYAL: ReadonlySet<RoomKind> = new Set<RoomKind>(['burial', 'antechamber', 'shrine', 'stairsDown']);
@@ -56,6 +62,10 @@ const EGYPT: FloorTheme = {
   gold: '#e3b449',
   lapis: '#2f5fa8',
   royal: ROYAL,
+  sand: '#dcc189',
+  sandDark: '#a88a52',
+  granite: '#5f4b48',
+  graniteEdge: '#a48c82',
 };
 
 function scale(hex: string, f: number): string {
@@ -93,6 +103,10 @@ function derived(base: string): FloorTheme {
     gold: '#e3b449',
     lapis: '#2f5fa8',
     royal: ROYAL,
+    sand: scale(base, 1.05),
+    sandDark: scale(base, 0.7),
+    granite: scale(base, 0.38),
+    graniteEdge: scale(base, 0.8),
   };
 }
 

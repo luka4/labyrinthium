@@ -2,12 +2,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
+import { lastCamp } from '../game/core/game';
 import { PYRAMIDS, SEALS, isPyramidId, type PyramidId } from '../game/core/pyramids';
 
 /**
  * Saved progress through the world. A descent between camps is never saved:
  * leaving or losing the torch resumes from the last camp, as in the design doc.
  */
+/** One-time teaching captions (plan 03): shown the first time a trap kind is lit. */
+export type HintId = 'plate' | 'block' | 'portcullis' | 'sandfall' | 'trapdoor' | 'collapse';
+
 type ProgressData = {
   /** artifacts taken */
   artifacts: Partial<Record<PyramidId, true>>;
@@ -20,6 +24,8 @@ type ProgressData = {
   /** the Black Pyramid's door-opening animation has been shown */
   blackUnlockSeen: boolean;
   endingSeen: boolean;
+  /** captions already shown */
+  hints: Partial<Record<HintId, true>>;
 };
 
 type ProgressActions = {
@@ -27,11 +33,12 @@ type ProgressActions = {
   startDescent: (id: PyramidId) => void;
   reachFloor: (id: PyramidId, floorIndex: number) => void;
   reachCamp: (id: PyramidId, floorIndex: number) => void;
-  /** development only: pretend a camp floor was reached (floors and camps changed in version 2) */
+  /** development only: pretend a camp floor was reached (any floor index is stored; the load sanitises it) */
   devReachCamp: (id: PyramidId, floorIndex: number) => void;
   takeArtifact: (id: PyramidId) => void;
   markBlackUnlockSeen: () => void;
   markEndingSeen: () => void;
+  markHint: (id: HintId) => void;
   resetProgress: () => void;
   /** development only: give the first n seal artifacts */
   devGrantArtifacts: (n: number) => void;
@@ -44,6 +51,7 @@ const EMPTY: ProgressData = {
   completions: {},
   blackUnlockSeen: false,
   endingSeen: false,
+  hints: {},
 };
 
 export const useProgress = create<ProgressData & ProgressActions>()(
@@ -71,6 +79,7 @@ export const useProgress = create<ProgressData & ProgressActions>()(
         }),
       markBlackUnlockSeen: () => set({ blackUnlockSeen: true }),
       markEndingSeen: () => set({ endingSeen: true }),
+      markHint: (id) => set((s) => (s.hints[id] ? s : { hints: { ...s.hints, [id]: true } })),
       resetProgress: () => set(EMPTY),
       devGrantArtifacts: (n) =>
         set((s) => {
@@ -81,7 +90,7 @@ export const useProgress = create<ProgressData & ProgressActions>()(
     }),
     {
       name: 'labyrinthium.progress',
-      version: 2,
+      version: 3,
       /**
        * v2: Egypt has 10 floors and camps follow the floor number (every 5th), so saved camp
        * indices no longer match: camps reset (artifacts and records stay), `deepest` is clamped.
@@ -96,16 +105,34 @@ export const useProgress = create<ProgressData & ProgressActions>()(
           }
           data.deepest = deepest;
         }
+        if (version < 3) {
+          // v3: Egypt has 25 floors and its own camp list; keep a camp that is still valid, else fall back to the last one
+          const camp: ProgressData['camp'] = {};
+          for (const [id, floor] of Object.entries(data.camp ?? {})) {
+            if (!isPyramidId(id) || typeof floor !== 'number') continue;
+            const p = PYRAMIDS[id];
+            const f = Math.max(0, Math.min(floor, p.floorCount - 1));
+            camp[id] = f === 0 || p.camps.includes(f) ? f : lastCamp(p, f);
+          }
+          data.camp = camp;
+          const deepest: ProgressData['deepest'] = {};
+          for (const [id, floor] of Object.entries(data.deepest ?? {})) {
+            if (isPyramidId(id) && typeof floor === 'number') deepest[id] = Math.min(floor, PYRAMIDS[id].floorCount - 1);
+          }
+          data.deepest = deepest;
+          data.hints = {};
+        }
         return { ...EMPTY, ...data };
       },
       storage: createJSONStorage(() => AsyncStorage),
-      partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen }) => ({
+      partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen, hints }) => ({
         artifacts,
         camp,
         deepest,
         completions,
         blackUnlockSeen,
         endingSeen,
+        hints,
       }),
     },
   ),

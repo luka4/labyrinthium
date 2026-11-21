@@ -21,7 +21,9 @@ export type SideView = {
 
 export function sideLayout(width: number, height: number, floors: number) {
   const top = height * 0.16;
-  const ground = height * 0.66;
+  // a tall pyramid (Egypt, 25 floors) gets more of the height: its tiers become fine courses
+  const fine = floors > 10;
+  const ground = height * (fine ? 0.72 : 0.66);
   const th = (ground - top) / floors;
   const cx = width * 0.38;
   const maxW = width * 0.6;
@@ -29,8 +31,8 @@ export function sideLayout(width: number, height: number, floors: number) {
   const tierWidth = (k: number) => minW + (maxW - minW) * (floors <= 1 ? 1 : k / (floors - 1));
   const tierY = (k: number) => top + k * th;
   const bw = maxW * 0.44;
-  const bh = height * 0.2;
-  const by = ground + height * 0.08;
+  const bh = height * (fine ? 0.16 : 0.2);
+  const by = ground + height * (fine ? 0.07 : 0.08);
   return {
     top,
     ground,
@@ -83,7 +85,9 @@ export function drawPyramidSide(canvas: SkCanvas, width: number, height: number,
       canvas.drawRect(rect, fill(rgba('#201b14')));
       canvas.drawRect({ x: rect.x + 0.5, y: rect.y + 0.5, width: rect.width - 1, height: rect.height - 1 }, stroke(rgba(p.color, 1, 0.3), 1));
     }
-    if (isCampFloor(p, k)) flame(canvas, cx - w / 2 - 14, y + th * 0.72, Math.min(9, th * 0.3), flick);
+    // fine courses: a thin joint on every other one, like ashlar
+    if (th < 14 && k % 2 === 1) canvas.drawRect({ x: rect.x, y: rect.y, width: rect.width, height: 1 }, fill(rgba('#000000', 0.35)));
+    if (isCampFloor(p, k)) flame(canvas, cx - w / 2 - 14, y + th * 0.72, th < 14 ? Math.max(3.5, th * 0.5) : Math.min(9, th * 0.3), flick);
   }
 
   // shaft and basement chamber with the sacred artifact
