@@ -35,7 +35,8 @@ Changed during the session from "plan everything first": plans written far ahead
 | 03 Egypt 25 floors, collapse, traps | done, revised after 01–02 | done `e8bd339` | collapse on floors 11–13, 17 too gentle (bot never sealed in) |
 | 04 Guardian, artifact escape | done | done `3dfcdb0` | guardian numbers not tuned beyond plan |
 | 05 Stars, secrets, sound, haptics | done | done `76eb0fb` | 91 code-made sounds unheard; audio-api needs one device check (Q39); 10 lax par warnings (tuning) |
-| 06–15 | not started | not started | NEXT: plan task 06 |
+| 06 World map, powers, pyramid infrastructure | done | done `49dd590` | globe land path 2.5 ms on desktop (unmeasured on phone); power and water sounds unheard |
+| 07–15 | not started | not started | NEXT: plan task 07 |
 
 Phase 1 complete (`601f342`). Phase 2 complete (commit `Phase 2 complete`). `check:floors` prints ~60 warnings: 41 are tiny fuzz floors with no rock for a secret (expected), the rest are tuning notes (lax pars, collapse sealed-in rates, collapse caps, floor 3 room share).
 
@@ -75,4 +76,4 @@ Each planner also gets: "Tasks 01–(N-1) are IMPLEMENTED and merged; plan again
 
 ## How to resume
 
-Tell Claude in this repo: "Continue the roadmap in plans/PROCESS.md." It should read this file, `README.md`, the briefs and the latest question logs, check the Status table and `git log`, and go on with the next step of the process (next: plan task 06).
+Tell Claude in this repo: "Continue the roadmap in plans/PROCESS.md." It should read this file, `README.md`, the briefs and the latest question logs, check the Status table and `git log`, and go on with the next step of the process (next: plan task 07).
