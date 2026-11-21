@@ -2,4 +2,4 @@
 // Kept apart from the manifest (which requires the audio files) so tests can import it in Node.
 
 /** base id -> number of variants (files `<base>.0` ... `<base>.n-1`) */
-export const VARIANTS: Record<string, number> = {"step.stone":6,"step.granite":4,"step.grit":4,"step.sand":4,"g.step":4,"spot.egypt.settle":4,"spot.egypt.trickle":3};
+export const VARIANTS: Record<string, number> = {"step.stone":6,"step.granite":4,"step.grit":4,"step.sand":4,"g.step":4,"spot.egypt.settle":4,"spot.egypt.trickle":3,"water.wade":4,"water.swim":3};

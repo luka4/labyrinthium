@@ -15,6 +15,10 @@ import { runStarChecks } from './check-stars';
 import { checkSecretsFloor, newSecretStats, runSecretRules, secretsHash } from './check-secrets';
 import { checkGuardianFloor, placementHash, runGuardianChecks } from './check-guardian';
 import { runLightChecks } from './check-light-rules';
+import { runPluginChecks } from './check-plugins';
+import { runPowerChecks } from './check-powers';
+import { runProgressChecks } from './check-progress';
+import { runWorldChecks } from './check-world';
 import { KINDS, checkTraps, featHash, type TrapStats } from './check-traps';
 import { runTrapRules } from './check-trap-rules';
 import { floorSeed, isCampFloor, lastCamp, type Pyramid } from '../src/game/core/game';
@@ -86,7 +90,13 @@ function ascii(f: Floor): string {
                     : 'c'
                   : sand !== null && !f.solid[i]
                     ? sand
-                    : i === f.stairs && f.tiles[i] === TILE.FLOOR
+                    : f.water && !f.solid[i] && f.water[i] >= 32
+                      ? f.water[i] >= 224
+                        ? 'W'
+                        : f.water[i] >= 128
+                          ? '~'
+                          : ','
+                      : i === f.stairs && f.tiles[i] === TILE.FLOOR
                       ? 'A'
                       : GLYPH[f.tiles[i]];
     }
@@ -390,6 +400,11 @@ runStarChecks({ fail, warn });
 runTrapRules({ fail, warn });
 runGuardianChecks({ fail, warn });
 runLightChecks({ fail, warn, snapshot, old, update: args.includes('--update') });
+// plan 06: powers and water, the plug-in and profile registries, progress v6, the globe's geography
+runPowerChecks({ fail, warn, snapshot, old, update: args.includes('--update') });
+runPluginChecks({ fail, warn, fnv });
+runProgressChecks({ fail, warn });
+runWorldChecks({ fail, warn });
 
 // camps
 const campIndices = Array.from({ length: egypt.floorCount }, (_, i) => i).filter((i) => isCampFloor(egypt, i));

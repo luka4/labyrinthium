@@ -45,6 +45,8 @@ Phase 1 complete (`601f342`). Phase 2 complete (commit `Phase 2 complete`). `che
 - Release APK (`--profile preview`) on the Redmi 9: 60 fps on floor 24 with chunked floor art, light mask and sand.
 - Listen to the sounds: `npm run sounds -- --wav <dir>` writes WAVs; agents only checked them objectively (peaks, seams, spectra).
 - After the device build confirms audio-api: remove `src/audio/engineExpo.ts`, the `expo-audio` dependency and its plugin entry.
+- Task 06, release APK on the Redmi 9: the globe turning (drag, coast, card fling) at >= 50 fps (the land projector is 2 ms on a desktop, unmeasured on the phone); floor 24 with the Mirror active (radius 9.5) + collapse + guardian at 60 fps.
+- Task 06, listen: `npm run sounds -- --wav <dir>` for the new `power.*`, `water.*`, `breath.low`, `drowned` ids; the Jade's world-bus muffling (`setBusFilter`) needs a device build of audio-api.
 - Web preview (`npm run web`): task 05's agent drove it in Chromium (secrets, replay floor, sound); the descent overview with the star pop and the guardian/basement floors were checked by scripts only.
 
 ## Remaining task descriptions (what each planner gets)

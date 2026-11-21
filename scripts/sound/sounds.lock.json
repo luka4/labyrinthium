@@ -934,6 +934,176 @@
   "channels": 1,
   "bytes": 127062
  },
+ "power.scarab": {
+  "sha1": "6b16e8379db921bb189c7c70cee4dcd72b7b8cc8",
+  "duration": 1.3,
+  "peakDb": -3,
+  "rmsDb": -19.47,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 5761
+ },
+ "power.mirror": {
+  "sha1": "64df95f5abcc465fbc5600615f184fdf61692fcd",
+  "duration": 1.6,
+  "peakDb": -3,
+  "rmsDb": -19.63,
+  "dc": 0.000001,
+  "loop": null,
+  "channels": 1,
+  "bytes": 8760
+ },
+ "power.naga": {
+  "sha1": "2b2221fd0e1e8b7dd5ecb1ee5e0626a9e5b6baf5",
+  "duration": 1.8,
+  "peakDb": -3,
+  "rmsDb": -19.51,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 14024
+ },
+ "power.jade": {
+  "sha1": "a3bb541d5ad54d805b4a5f10c9b921fed9651031",
+  "duration": 2.6,
+  "peakDb": -3,
+  "rmsDb": -22.97,
+  "dc": 0.000003,
+  "loop": null,
+  "channels": 1,
+  "bytes": 12428
+ },
+ "power.end": {
+  "sha1": "8203460225868f1d0723fa5b4ee130777004a767",
+  "duration": 1.1,
+  "peakDb": -3,
+  "rmsDb": -20.44,
+  "dc": 0.000009,
+  "loop": null,
+  "channels": 1,
+  "bytes": 4660
+ },
+ "power.empty": {
+  "sha1": "de0af3142c334fecdde719d80b9c9b795b355014",
+  "duration": 0.25,
+  "peakDb": -3,
+  "rmsDb": -24.23,
+  "dc": 0.000208,
+  "loop": null,
+  "channels": 1,
+  "bytes": 1489
+ },
+ "water.wade.0": {
+  "sha1": "0f6f75dc3b298e7f73df4ebbca9ff198be389e13",
+  "duration": 0.55,
+  "peakDb": -3,
+  "rmsDb": -28.7,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 4425
+ },
+ "water.wade.1": {
+  "sha1": "922238c913132500cc4b1afe96230f49ac899373",
+  "duration": 0.55,
+  "peakDb": -3,
+  "rmsDb": -27.94,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 4401
+ },
+ "water.wade.2": {
+  "sha1": "2e8e9e4220e09c3503043850066dd1baffa5660e",
+  "duration": 0.55,
+  "peakDb": -3,
+  "rmsDb": -28.07,
+  "dc": 0.000001,
+  "loop": null,
+  "channels": 1,
+  "bytes": 4452
+ },
+ "water.wade.3": {
+  "sha1": "090426e5dc86e9d3f758d3b58a9cf8f9cdf2a969",
+  "duration": 0.55,
+  "peakDb": -3,
+  "rmsDb": -27.02,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 4439
+ },
+ "water.swim.0": {
+  "sha1": "4306cafdfa1449f9273fe366a93113e50897f0d0",
+  "duration": 1,
+  "peakDb": -3,
+  "rmsDb": -17.13,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 8154
+ },
+ "water.swim.1": {
+  "sha1": "b8771b0b4f1e81d7636069e73d1a6f99e2cb09aa",
+  "duration": 1,
+  "peakDb": -3,
+  "rmsDb": -16.02,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 7594
+ },
+ "water.swim.2": {
+  "sha1": "ce550a0615889b7d56a0f92638de8bde1e7f1728",
+  "duration": 1,
+  "peakDb": -3,
+  "rmsDb": -17.7,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 7441
+ },
+ "water.dive": {
+  "sha1": "60c442faca89295b35e571c150cc7a36be97c41a",
+  "duration": 1.1,
+  "peakDb": -3,
+  "rmsDb": -16.38,
+  "dc": 0.000005,
+  "loop": null,
+  "channels": 1,
+  "bytes": 8371
+ },
+ "water.surface": {
+  "sha1": "e05a8193eb3228a6cc66daee6f2591ee0fd3bdc2",
+  "duration": 1,
+  "peakDb": -3,
+  "rmsDb": -21.28,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 5817
+ },
+ "breath.low": {
+  "sha1": "7c42fb3f01171d7cbbbb883610fe7ce7589df126",
+  "duration": 1,
+  "peakDb": -3,
+  "rmsDb": -16.34,
+  "dc": 0.000013,
+  "loop": null,
+  "channels": 1,
+  "bytes": 5840
+ },
+ "drowned": {
+  "sha1": "9ef02e54a6eebfd2980779df451c84a8f1c6b01d",
+  "duration": 2.6,
+  "peakDb": -3,
+  "rmsDb": -15.31,
+  "dc": 0,
+  "loop": null,
+  "channels": 1,
+  "bytes": 19876
+ },
  "ir.small": {
   "sha1": "ba5450ebc7920aa7fcd16e89f27d62562fdc2b48",
   "duration": 0.9,

@@ -1,6 +1,9 @@
 import type { Lattice, Room, RoomKind, Spot } from './floor';
 import { EGYPT_FRAGMENT_FLOORS, EGYPT_ROWS, EGYPT_SECRETS, type EgyptRow, type GuardianRow } from './egypt';
+import { CULTURE_PROFILES } from './cultures';
+import { bindProfileRules, hasRule } from './plugins';
 import type { Rng } from './rng';
+import type { FloorRow } from './tables';
 
 /**
  * Architecture profiles: what a pyramid's floors are built from. One profile per
@@ -8,7 +11,7 @@ import type { Rng } from './rng';
  * post-carve hooks (traps, light sources, culture features) without touching the
  * base layout code.
  */
-export type ArchProfileId = 'egypt' | 'generic' | 'black';
+export type ArchProfileId = string;
 
 export type ArchProfile = {
   id: ArchProfileId;
@@ -53,6 +56,10 @@ export type ArchProfile = {
   basementRoom: RoomKind;
   /** post-carve passes; each gets its own rng stream */
   hooks?: Array<(ctx: GenContext) => void>;
+  /** rule plug-in ids (plugins.ts), run in this order after the built-in features */
+  rules?: readonly string[];
+  /** the table row of a floor (built by profileFromTable); plug-ins read their parameters from `row.rules` */
+  row?: (floorIndex: number) => FloorRow;
 };
 
 /** The linear loop ramp of plan 01 (floors 1-10 of Egypt, every floor of the other profiles). */
@@ -83,10 +90,10 @@ const EGYPT: ArchProfile = {
   nicheRate: 0.06,
   lights: { secPerTile: EGYPT_ROWS.map((r) => r.secPerTile) },
   basementRoom: 'burial',
+  row: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)],
 };
 
-const PROFILES: Record<ArchProfileId, ArchProfile> = {
-  egypt: EGYPT,
+const BASE_PROFILES: Record<string, ArchProfile> = {
   generic: {
     ...EGYPT,
     id: 'generic',
@@ -104,6 +111,7 @@ const PROFILES: Record<ArchProfileId, ArchProfile> = {
     secrets: () => 1,
     fragment: () => -1,
     falseDoor: false,
+    row: undefined,
   },
   black: {
     ...EGYPT,
@@ -122,12 +130,36 @@ const PROFILES: Record<ArchProfileId, ArchProfile> = {
     secrets: () => 1,
     fragment: () => -1,
     falseDoor: false,
+    row: undefined,
   },
 };
 
-export function profileFor(id: ArchProfileId): ArchProfile {
-  return PROFILES[id];
+const PROFILES = new Map<string, ArchProfile>();
+const checked = new Set<string>();
+for (const p of [EGYPT, BASE_PROFILES.generic, BASE_PROFILES.black, ...CULTURE_PROFILES]) PROFILES.set(p.id, p);
+
+/** Adds a profile (checks use it for variants of Egypt); throws on a duplicate id. */
+export function registerProfile(p: ArchProfile): void {
+  if (PROFILES.has(p.id)) throw new Error(`architecture profile '${p.id}' is already registered`);
+  PROFILES.set(p.id, p);
 }
+
+/** The profile of an id; throws on an unknown id, or on rule ids nobody registered (checked on first use). */
+export function profileFor(id: ArchProfileId): ArchProfile {
+  const p = PROFILES.get(id);
+  if (!p) throw new Error(`unknown architecture profile '${id}'`);
+  if (p.rules && !checked.has(id)) {
+    for (const r of p.rules) if (!hasRule(r)) throw new Error(`architecture profile '${id}' lists unknown rule '${r}'`);
+    checked.add(id);
+  }
+  return p;
+}
+
+export function allProfiles(): ArchProfile[] {
+  return [...PROFILES.values()];
+}
+
+bindProfileRules((id) => PROFILES.get(id)?.rules ?? []);
 
 export type Dir = 0 | 1 | 2 | 3; // index into DIRS: east, west, south, north
 

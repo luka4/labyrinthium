@@ -1,13 +1,14 @@
 import type { SkCanvas } from '@shopify/react-native-skia';
 
-import { diamond, easeOutCubic, embers, fill, glow, rgba, stroke } from './art';
+import { easeOutCubic, embers, fill, glow, rgba, stroke } from './art';
+import { drawEmblem, type EmblemId } from './drawEmblems';
 
 /** The artifact reveal (and the title's torch): a light that grows out of the dark, with embers. */
 export function drawRelic(
   canvas: SkCanvas,
   width: number,
   height: number,
-  o: { color: string; time: number; reveal: number; heart?: boolean },
+  o: { color: string; time: number; reveal: number; heart?: boolean; emblem?: EmblemId },
 ) {
   const cx = width / 2;
   const cy = height * 0.5;
@@ -30,10 +31,8 @@ export function drawRelic(
       stroke(rgba(o.heart ? '#ff9b8a' : '#f3c55a', 0.18 * grow), 2),
     );
   }
-  const s = r * 0.11 * (0.4 + 0.6 * grow);
-  diamond(canvas, cx, cy, s * 0.95, s * 1.4, rgba(o.color));
-  diamond(canvas, cx, cy, s * 0.55, s * 0.85, rgba(o.heart ? '#ffc9b8' : '#ffe7a3'));
-  canvas.drawCircle(cx - s * 0.2, cy - s * 0.45, s * 0.12, fill(rgba('#ffffff', 0.8 * grow)));
+  // the artifact's own emblem at the heart of the light
+  drawEmblem(canvas, o.emblem ?? (o.heart ? 'heart' : 'scarab'), cx, cy, r * 0.34 * (0.4 + 0.6 * grow), { lit: grow, dim: false });
   embers(canvas, cx, cy + r * 0.2, r * 0.6, r * 0.6, 28, o.time);
 }
 

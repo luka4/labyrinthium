@@ -1,5 +1,6 @@
 import { step, type Direction, type GameState } from '../../game/core/game';
 import { COVER, sandLevel } from '../../game/core/collapse';
+import { band, waterAt } from '../../game/core/water';
 import { holdDir, runDir } from '../../game/core/walk';
 
 /**
@@ -38,6 +39,14 @@ export function createWalker(onBump: () => void): Walker {
     // a dormant guardian is a statue in the way: auto-walk stops short of it
     if (g && (g.mode === 'dormant' || g.mode === 'waking') && g.pos === tile) return true;
     return (k >= 0 && s.trapPhase[k] === 0) || sandLevel(s, tile) >= COVER;
+  };
+
+  /** a flick-run also stops before a tile whose water band differs from yours, so you never run into deep water by accident */
+  const avoidRun = (s: GameState) => {
+    const base = avoid(s);
+    if (!s.water) return base;
+    const here = band(waterAt(s, s.pos));
+    return (tile: number) => base(tile) || band(waterAt(s, tile)) !== here;
   };
 
   const interesting = (s: GameState) => {
@@ -86,7 +95,7 @@ export function createWalker(onBump: () => void): Walker {
         dir = queued;
         queued = null;
       } else if (run !== null) {
-        dir = runDir(s.floor, s.grid, s.pos, run, interesting(s), avoid(s));
+        dir = runDir(s.floor, s.grid, s.pos, run, interesting(s), avoidRun(s));
         run = dir;
       } else if (held !== null) {
         dir = holdDir(s.grid, s.pos, held, avoid(s));

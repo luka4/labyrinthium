@@ -30,6 +30,8 @@ import { placeGuardian } from './guardian';
 import { placeSecrets } from './secrets';
 import { placeTraps } from './traps';
 import { createRng, shuffle } from './rng';
+import { placeRules } from './plugins';
+import './rules';
 
 /**
  * Architectural floor generator (plan 01). Integer math and mulberry32 only, so
@@ -520,7 +522,7 @@ export function addFeatures(layout: Layout, spec: GenSpec, below: Layout | null)
     exitFront: door.exitFront,
     guardian,
   });
-  return {
+  const floor: Floor = {
     ...rest,
     items: lights.items,
     fixtures,
@@ -532,7 +534,12 @@ export function addFeatures(layout: Layout, spec: GenSpec, below: Layout | null)
     exitFront: door.exitFront,
     guardian,
     secrets,
+    water: null,
+    ext: {},
   };
+  // rule plug-ins (plan 06) run last, each on its own rng stream; none on Egypt
+  if (profile.rules?.length) placeRules({ floor, layout, spec, profile, row: profile.row?.(spec.floorIndex) ?? null });
+  return floor;
 }
 
 export function generateFloor(spec: GenSpec, below: Layout | null = null): Floor {

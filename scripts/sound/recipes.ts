@@ -47,7 +47,7 @@ import {
 } from './dsp';
 import { convolve, roomIr } from './room';
 
-export type SoundGroup = 'core' | 'game' | 'bed:egypt' | 'bed:exterior';
+export type SoundGroup = 'core' | 'game' | 'bed:egypt' | 'bed:exterior' | 'powers' | 'water';
 
 export type Recipe = {
   id: string;
@@ -684,6 +684,132 @@ add(
     ),
   { loop: true, kbps: 48 },
 );
+
+
+// ---- artifact powers (plan 06) ----------------------------------------------------------------------------------
+// Loaded when the run carries a power. All dry: they are interface sounds on the ui bus.
+
+add('power.scarab', 'powers', -12, (r) => {
+  const n = T(1.3);
+  const x = zeros(n);
+  // chitin: three dry clicks, band-passed noise around 3 kHz
+  for (let k = 0; k < 3; k++) mixAt(x, mul(bp(white(T(0.03), r), 3000 + 300 * k, 3), envExp(T(0.03), 0.006, 0.0005)), 0.05 * k, 0.8);
+  // gold shimmer: a free bar at A5 and a bright second, long
+  mixAt(x, goldBar(T(1.2), r, 880, 0.9), 0.14, 0.6);
+  mixAt(x, goldBar(T(0.9), r, 1318, 0.6), 0.2, 0.25);
+  return done(x);
+});
+add('power.mirror', 'powers', -12, (r) => {
+  const n = T(1.6);
+  const x = zeros(n);
+  // obsidian glass: inharmonic ring at 1.8, 4.1 and 6.7 kHz
+  const modes: Mode[] = [
+    { f: 1800, t60: 1.2, a: 1 },
+    { f: 4100, t60: 0.8, a: 0.6 },
+    { f: 6700, t60: 0.5, a: 0.35 },
+  ];
+  mixAt(x, modal(T(1.4), modes, strike(0.35, r, 0.15)), 0, 1);
+  // a soft rising whoosh of air, the light thrown back
+  mixAt(x, whoosh(T(0.9), r, 500, 5200, 0.75), 0.05, 0.4);
+  return done(x);
+});
+add('power.naga', 'powers', -12, (r) => {
+  const n = T(1.8);
+  const x = zeros(n);
+  // a low swell of water, slowly amplitude-modulated
+  const swell = lp(brown(n, r), 500);
+  mixAt(x, mul(mul(swell, envPoints(n, [[0, 0], [0.7, 1], [1.8, 0]])), (i) => 0.75 + 0.25 * Math.sin((i / SR) * 2 * Math.PI * 3.5)), 0, 0.9);
+  // the serpent's hiss, slow in and out
+  mixAt(x, mul(hp(white(T(1.1), r), 3200), envPoints(T(1.1), [[0, 0], [0.4, 0.5], [0.7, 0.35], [1.1, 0]])), 0.25, 0.28);
+  // four bubbles: sine chirps from 300 to 900 Hz
+  for (let k = 0; k < 4; k++) {
+    const d = 0.07 + 0.03 * r();
+    mixAt(x, mul(sweep(T(d), 300 + 60 * k, 900 + 120 * k), envExp(T(d), d * 0.5, 0.004)), 0.5 + 0.2 * k + 0.05 * r(), 0.35);
+  }
+  return done(x);
+});
+add('power.jade', 'powers', -10, (r) => {
+  const n = T(2.6);
+  const x = zeros(n);
+  // a deep chime: jade rings low and long
+  const modes: Mode[] = [
+    { f: 220, t60: 2.2, a: 1 },
+    { f: 552, t60: 1.8, a: 0.6 },
+    { f: 1010, t60: 1.2, a: 0.35 },
+  ];
+  mixAt(x, modal(n, modes, strike(0.9, r, 0.1)), 0, 1);
+  // a sub thump, then the held tail: time standing still
+  mixAt(x, mul(sweep(T(0.45), 80, 45), envExp(T(0.45), 0.13, 0.004)), 0, 0.9);
+  mixAt(x, mul(lp(pink(T(1.5), r), 420), envPoints(T(1.5), [[0, 0], [0.3, 0.5], [1.5, 0]])), 0.3, 0.28);
+  return done(x);
+});
+add('power.end', 'powers', -16, (r) => {
+  const x = zeros(T(1.1));
+  mixAt(x, modal(T(0.8), [{ f: 784, t60: 0.5, a: 1 }, { f: 1570, t60: 0.3, a: 0.3 }], strike(0.6, r, 0.1)), 0, 0.8);
+  mixAt(x, modal(T(0.9), [{ f: 587, t60: 0.7, a: 1 }, { f: 1180, t60: 0.4, a: 0.3 }], strike(0.6, r, 0.1)), 0.18, 0.8);
+  return done(x);
+});
+add('power.empty', 'powers', -18, (r) => done(stoneHit(T(0.25), r, 160, 700, 4, 0.07, 3)));
+
+// ---- water (plan 06) ---------------------------------------------------------------------------------------------
+// Loaded when the floor has water: wading, swimming, diving, breath.
+
+addVariants('water.wade', 4, 'water', -16, (r) => {
+  const n = T(0.55);
+  const x = zeros(n);
+  // the splash: droplets between 1 and 5 kHz, then the body of the slosh
+  mixAt(x, mul(bp(grains(T(0.3), (t) => 260 * Math.exp(-5 * t), [0.6, 3], 0.7, r), 2600, 0.7), envExp(T(0.3), 0.09, 0.002)), 0, 0.7);
+  mixAt(x, mul(lp(white(T(0.45), r), 400), envPoints(T(0.45), [[0, 0], [0.04, 1], [0.45, 0]])), 0.01, 0.9);
+  return done(x);
+});
+addVariants('water.swim', 3, 'water', -16, (r) => {
+  const n = T(1.0);
+  const x = zeros(n);
+  // two strokes: a low slosh each, with drips after
+  for (let k = 0; k < 2; k++) {
+    const at = 0.03 + 0.4 * k;
+    mixAt(x, mul(lp(brown(T(0.38), r), 600), envPoints(T(0.38), [[0, 0], [0.09, 1], [0.38, 0]])), at, 1);
+    mixAt(x, mul(bp(grains(T(0.3), (t) => 90 * Math.exp(-4 * t), [0.8, 3], 0.6, r), 3200, 1), envExp(T(0.3), 0.1, 0.002)), at + 0.12, 0.35);
+  }
+  return done(x);
+});
+add('water.dive', 'water', -14, (r) => {
+  const n = T(1.1);
+  const x = zeros(n);
+  mixAt(x, mul(sweep(T(0.5), 600, 90), envExp(T(0.5), 0.14, 0.005)), 0, 0.7);
+  mixAt(x, mul(lp(white(T(0.5), r), 900), envPoints(T(0.5), [[0, 0], [0.05, 1], [0.5, 0]])), 0, 0.6);
+  // muffled bubbles rising after the plunge
+  for (let k = 0; k < 5; k++) {
+    const d = 0.06 + 0.03 * r();
+    mixAt(x, lp(mul(sweep(T(d), 260 + 40 * k, 700 + 90 * k), envExp(T(d), d * 0.5, 0.004)), 1400), 0.3 + 0.12 * k, 0.4);
+  }
+  return done(x);
+});
+add('water.surface', 'water', -14, (r) => {
+  const n = T(1.0);
+  const x = zeros(n);
+  // the gasp: an air rush around 1.2 kHz, then drips
+  mixAt(x, mul(bp(white(T(0.5), r), 1200, 0.8), envPoints(T(0.5), [[0, 0], [0.12, 1], [0.5, 0]])), 0, 0.9);
+  mixAt(x, mul(bp(grains(T(0.5), (t) => 80 * Math.exp(-3 * t), [0.8, 3], 0.6, r), 3000, 1), envExp(T(0.5), 0.2, 0.002)), 0.3, 0.4);
+  return done(x);
+});
+add('breath.low', 'water', -18, (r) => {
+  // a muffled heartbeat: two soft thumps, twice
+  const x = zeros(T(1.0));
+  for (let k = 0; k < 2; k++) {
+    mixAt(x, mul(sweep(T(0.22), 95, 50), envExp(T(0.22), 0.06, 0.006)), 0.5 * k, 0.9);
+    mixAt(x, mul(sweep(T(0.2), 80, 45), envExp(T(0.2), 0.05, 0.006)), 0.5 * k + 0.17, 0.6);
+  }
+  void r;
+  return done(x);
+});
+add('drowned', 'water', -12, (r) => {
+  const n = T(2.6);
+  // an underwater rumble swelling, then gone
+  const x = mul(lp(brown(n, r), 260), envPoints(n, [[0, 0], [1.1, 1], [1.8, 0.7], [2.6, 0]]));
+  mixAt(x, mul(sweep(n, 70, 38), envPoints(n, [[0, 0], [0.9, 0.7], [2.6, 0]])), 0, 0.5);
+  return done(x);
+});
 
 // ---- impulse responses --------------------------------------------------------------------------------------------
 

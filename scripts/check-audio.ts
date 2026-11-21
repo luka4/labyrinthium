@@ -51,6 +51,7 @@ function fakeEngine() {
     },
     duck: (bus, dB) => ducks.push({ bus, dB }),
     setBusLevel: (b, v) => (busLevels[b] = v),
+    setBusFilter: () => {},
     setVolumes: () => {},
     setRoom: (size, mix) => rooms.push(`${size}:${mix}`),
     suspend: async () => {},
@@ -63,7 +64,7 @@ function fakeEngine() {
 export function runAudioChecks({ fail, warn }: Report) {
   void warn;
   // ---- the feedback table points at real sounds ----
-  const kinds = ['smallTorch', 'torch', 'bigTorch', 'lamp', 'candle', 'oilJar', 'sconce', 'brazier', 'shrineCandles', 'block', 'portcullis', 'sandfall', 'trapdoor', 'amulet', null] as const;
+  const kinds = ['smallTorch', 'torch', 'bigTorch', 'lamp', 'candle', 'oilJar', 'sconce', 'brazier', 'shrineCandles', 'block', 'portcullis', 'sandfall', 'trapdoor', 'amulet', 'scarab', 'mirror', 'naga', 'jade', 'shallow', 'deep', null] as const;
   const sample = (type: GameEvent['type'], kind: GameEvent['kind']): GameEvent => ({ seq: 1, type, kind, at: 1 });
   const dummy = startFloor(egypt, 2);
   for (const [type, f] of Object.entries(FEEDBACK)) {

@@ -1,32 +1,18 @@
 import type { PyramidId } from '../game/core/pyramids';
-import type { SoundGroup, SoundId } from './manifest';
+import { BEDS } from '../kits/beds';
+import { kitFor } from '../kits';
+import type { BedSpec } from '../kits/types';
+import type { SoundId } from './manifest';
 import type { AudioEngine, LoopVoice } from './types';
+
+export { BEDS };
+export type { BedSpec };
 
 /**
  * Ambience (plan 05, section 13): two loops of co-prime length per pyramid (room tone and wind in the air
  * shafts) mixed by depth, plus random spot sounds (settling stone, trickling sand); the title and the map
  * get a night desert wind. Egypt has its own recordings; the other pyramids use its bed until tasks 07-09.
  */
-export type BedSpec = {
-  group: SoundGroup;
-  room: SoundId;
-  air: SoundId;
-  settle: string;
-  trickle: string;
-  /** a low-pass (Hz) that makes a borrowed bed sound different (0 = none) */
-  lowpass: number;
-};
-
-const EGYPT_BED: BedSpec = { group: 'bed:egypt', room: 'bed.egypt.room', air: 'bed.egypt.air', settle: 'spot.egypt.settle', trickle: 'spot.egypt.trickle', lowpass: 0 };
-
-export const BEDS: Record<PyramidId, BedSpec> = {
-  egypt: EGYPT_BED,
-  maya: { ...EGYPT_BED, lowpass: 2600 },
-  cambodia: { ...EGYPT_BED, lowpass: 3400 },
-  china: { ...EGYPT_BED, lowpass: 3000 },
-  black: { ...EGYPT_BED, lowpass: 1800 },
-};
-
 const VARIANTS = { settle: 4, trickle: 3 } as const;
 
 export type Ambience = {
@@ -67,7 +53,7 @@ export function createAmbience(engine: AudioEngine, random: () => number = Math.
 
     enter(pyramid, floorIndex, floorCount) {
       depth = floorCount > 1 ? floorIndex / (floorCount - 1) : 0;
-      const spec = BEDS[pyramid];
+      const spec = kitFor(pyramid).bed;
       if (bed === spec && room && air) {
         const l = levels(depth);
         room.set({ gain: l.room }, 1.5);

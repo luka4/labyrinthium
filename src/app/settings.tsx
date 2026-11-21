@@ -115,6 +115,8 @@ export default function SettingsScreen() {
                 <Button key={n} label={`${n}`} style={styles.devButton} onPress={() => useProgress.getState().devGrantArtifacts(n)} />
               ))}
             </View>
+            <Text style={type.caption}>Water and powers: Egypt floor 3 with shallow, deep and flooded water, all four powers, no saves.</Text>
+            <Button label="Power sandbox" onPress={() => router.push({ pathname: '/play/[id]', params: { id: 'egypt', from: 'sandbox' } })} />
             <Text style={type.caption}>Start Egypt at a floor (saves it as the checkpoint, then opens the pyramid):</Text>
             <View style={styles.devRow}>
               <Button label="−" style={styles.devButton} onPress={() => setDevFloor((n) => Math.max(1, n - 1))} />

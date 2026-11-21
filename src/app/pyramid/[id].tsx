@@ -3,14 +3,17 @@ import { useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { floorFor, warmLayouts } from '../../game/core/generate';
-import { EGYPT_FRAGMENT_FLOORS, EGYPT_ROWS } from '../../game/core/egypt';
+import { profileFor } from '../../game/core/architecture';
+import { drawEmblem } from '../../game/render/drawEmblems';
+import { SealDoor } from '../../screens/map/SealDoor';
+import { powerCopy } from '../../screens/powerCopy';
 import { PYRAMIDS, campFloorNumbers, isPyramidId, type PyramidId } from '../../game/core/pyramids';
 import { popcount } from '../../game/core/secrets';
 import { STAR, parTime, starCount } from '../../game/core/stars';
-import { storyOf } from '../../game/story';
+import { storyOf } from '../../kits';
 import { drawPyramidSide, sideLayout } from '../../game/render/drawPyramidSide';
 import { clock } from '../../screens/play/results';
-import { fragmentsRead, isUnlocked, pyramidStars, useProgress, type FloorRecord } from '../../state/progress';
+import { fragmentsRead, isUnlocked, ownedPowers, pyramidStars, useProgress, type FloorRecord } from '../../state/progress';
 import { useReducedMotion } from '../../state/settings';
 import { ArtCanvas, useTicker } from '../../ui/ArtCanvas';
 import { Button } from '../../ui/Button';
@@ -54,12 +57,19 @@ export default function PyramidScreen() {
   const camps = campFloorNumbers(p);
   const stars = pyramidStars(floors, id);
   const story = storyOf(id);
-  const read = fragmentsRead(floors, id, (i) => p.architecture === 'egypt' ? (EGYPT_FRAGMENT_FLOORS as readonly number[]).indexOf(i) : -1);
+  const profile = profileFor(p.architecture);
+  const read = fragmentsRead(floors, id, (i) => profile.fragment?.(i) ?? -1);
   const gridW = width;
   const cell = Math.floor((gridW - 4 * space.sm) / 5);
   const canReplay = (i: number) => i <= (deepest ?? 0) && (i < p.floorCount - 1 || taken);
-  // the first floor with a roaming guardian (Egypt only for now), from the rows
-  const guardianFrom = p.architecture === 'egypt' ? EGYPT_ROWS.findIndex((r) => r.guardian && !r.guardian.sentinel) : -1;
+  // the first floor with a roaming guardian, from the profile
+  let guardianFrom = -1;
+  for (let i = 0; i < p.floorCount && guardianFrom < 0; i++) {
+    const g = profile.guardian?.(i);
+    if (g && !g.sentinel) guardianFrom = i;
+  }
+  const owned = ownedPowers(artifacts);
+  const own = p.powerId ? powerCopy(p.powerId, id) : null;
 
   const play = (from: 'top' | 'camp') => {
     if (from === 'top') useProgress.getState().startDescent(id);
@@ -86,6 +96,12 @@ export default function PyramidScreen() {
           </Text>
         </View>
 
+        {id === 'black' && (
+          <View style={{ alignItems: 'center' }}>
+            <SealDoor collected={artifacts} unlock={1} time={reduced ? 0 : time / 1000} size="page" />
+          </View>
+        )}
+
         <View style={styles.facts}>
           <Fact label="Floors" value={`${p.floorCount}`} />
           <Fact label="Camp floors" value={listNumbers(camps)} />
@@ -95,11 +111,42 @@ export default function PyramidScreen() {
         </View>
 
         <View style={styles.card}>
-          <Text style={type.label}>{taken ? 'Artifact taken' : 'Kept in the basement'}</Text>
-          <Text style={[type.heading, taken && { color: colors.gold }]}>{p.artifact}</Text>
-          <Text style={[type.body, { color: colors.muted }]}>{p.power}</Text>
-          <Text style={type.caption}>Artifact powers arrive in a later version.</Text>
+          <View style={styles.row}>
+            <ArtCanvas width={44} height={44} deps={[taken]} draw={(c) => drawEmblem(c, p.powerId ?? 'heart', 22, 22, 38, { lit: taken ? 0.6 : 0, dim: !taken })} />
+            <View style={{ flex: 1 }}>
+              <Text style={type.label}>{taken ? 'Artifact taken' : 'Kept in the basement'}</Text>
+              <Text style={[type.heading, taken && { color: colors.gold }]}>{p.artifact}</Text>
+            </View>
+          </View>
+          {own ? (
+            <>
+              <Text style={[type.body, { color: own.color }]}>{own.verb}</Text>
+              <Text style={[type.body, { color: colors.muted }]}>{own.text}</Text>
+              <Text style={type.caption}>{own.strongest} Uses refill at every camp.</Text>
+            </>
+          ) : (
+            <Text style={[type.body, { color: colors.muted }]}>{p.power}</Text>
+          )}
         </View>
+
+        {owned.length > 0 && (
+          <View style={styles.card}>
+            <Text style={type.label}>Powers you carry</Text>
+            {owned.map((pw) => {
+              const c = powerCopy(pw, id);
+              return (
+                <View key={pw} style={styles.row}>
+                  <ArtCanvas width={36} height={36} deps={[pw]} draw={(cv) => drawEmblem(cv, pw, 18, 18, 32, { lit: c.attunedHere ? 0.6 : 0, dim: false })} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.powerName}>{c.name}</Text>
+                    <Text style={type.caption}>{c.here}{id === 'black' ? '' : ' here'}</Text>
+                  </View>
+                  {c.attunedHere && <Text style={styles.strongest}>Strongest here</Text>}
+                </View>
+              );
+            })}
+          </View>
+        )}
 
         <View style={styles.section}>
           <Text style={type.label} accessibilityRole="header">
@@ -266,4 +313,7 @@ const styles = StyleSheet.create({
   camp: { position: 'absolute', top: 5, right: 5, width: 8, height: 8, backgroundColor: colors.gold, transform: [{ rotate: '45deg' }] },
   storyScroll: { maxHeight: 360 },
   actions: { gap: space.sm, paddingTop: space.md },
+  row: { flexDirection: 'row', alignItems: 'center', gap: space.md },
+  powerName: { color: colors.ink, fontFamily: fonts.bodySemi, fontSize: 15 },
+  strongest: { color: colors.gold, fontFamily: fonts.bodySemi, fontSize: 12 },
 });

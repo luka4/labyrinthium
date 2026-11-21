@@ -2,6 +2,7 @@ import { Redirect, router, useLocalSearchParams } from 'expo-router';
 import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { PYRAMIDS, isPyramidId } from '../../game/core/pyramids';
+import { powerCopy } from '../../screens/powerCopy';
 import { drawRelic } from '../../game/render/drawRelic';
 import { pyramidStars, sealsFilled, useProgress } from '../../state/progress';
 import { useReducedMotion } from '../../state/settings';
@@ -26,6 +27,7 @@ export default function ArtifactScreen() {
   const artifacts = useProgress((s) => s.artifacts);
   const record = useProgress((s) => (isPyramidId(id) ? s.records[id] : undefined));
   const floors = useProgress((s) => s.floors);
+  const completions = useProgress((s) => (isPyramidId(id) ? s.completions[id] : undefined));
 
   if (!isPyramidId(id)) return <Redirect href="/map" />;
   const p = PYRAMIDS[id];
@@ -33,7 +35,8 @@ export default function ArtifactScreen() {
   const seals = sealsFilled(artifacts);
   const stars = pyramidStars(floors, id);
   const reveal = reduced ? 1 : Math.min(1, time / REVEAL_MS);
-  const artH = Math.min(height * 0.45, 400);
+  const artH = Math.min(height * 0.4, 360);
+  const power = p.powerId ? powerCopy(p.powerId, id) : null;
 
   const line = heart
     ? 'The last artifact. Under your feet, the basement floor begins to crack.'
@@ -56,12 +59,22 @@ export default function ArtifactScreen() {
         width={width}
         height={artH}
         deps={[time]}
-        draw={(c, w, h) => drawRelic(c, w, h, { color: heart ? '#c0392b' : p.color, time: reduced ? 0 : time, reveal, heart })}
+        draw={(c, w, h) => drawRelic(c, w, h, { color: heart ? '#c0392b' : p.color, time: reduced ? 0 : time, reveal, heart, emblem: p.powerId ?? 'heart' })}
         style={styles.art}
       />
       <View style={[styles.body, { opacity: reveal }]}>
         <Text style={[type.body, styles.center]}>You took it from the dark and found the way out.</Text>
-        <Text style={[type.body, styles.center, { color: colors.muted }]}>{p.power}</Text>
+        {power ? (
+          <View style={styles.power}>
+            <Text style={type.label}>{completions === 1 ? 'New power' : 'Power'}</Text>
+            <Text style={[type.heading, { color: power.color }]}>{power.verb}</Text>
+            <Text style={[type.caption, styles.center]}>{power.text}</Text>
+            <Text style={[type.caption, styles.center, { color: colors.gold }]}>{power.strongest}</Text>
+            {completions === 1 && <Text style={[type.caption, styles.center]}>Uses refill at every camp. Tap it under the board.</Text>}
+          </View>
+        ) : (
+          <Text style={[type.body, styles.center, { color: colors.muted }]}>{p.power}</Text>
+        )}
         <Text style={[type.caption, styles.center, { color: colors.gold }]}>{line}</Text>
         {id !== 'black' || stars.stars > 0 ? (
           <Text style={[type.caption, styles.center, { color: colors.muted }]}>
@@ -87,5 +100,6 @@ const styles = StyleSheet.create({
   center: { textAlign: 'center' },
   art: { marginHorizontal: -space.lg },
   body: { gap: space.sm, paddingHorizontal: space.md },
+  power: { alignItems: 'center', gap: 4 },
   actions: { width: '100%', maxWidth: 420, alignSelf: 'center' },
 });

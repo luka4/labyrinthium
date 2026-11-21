@@ -4,7 +4,11 @@
  * Rows 1-9 are frozen (their floors are bit-identical to plan 01); row 10 keeps its numbers but is
  * a normal floor now. Rows 11-25 and all trap/collapse numbers may be tuned.
  */
+import type { PyramidTable } from './tables';
+
 export type GuardianRow = {
+  /** which sprite and sounds the kit uses (src/kits); default 'keeper' */
+  kind?: string;
   /** seconds of burning time before it wakes by itself (the sentinel: Infinity, only the Scarab wakes it) */
   wake: number;
   /** seconds per tile: walking its rounds, searching a noise, hunting you */
@@ -98,3 +102,5 @@ export const EGYPT_SECRETS = (i: number) => (i === 24 ? 2 : i < 6 ? 1 : i < 16 ?
 
 /** 0-based floors whose first secret holds a painted story fragment (floors 3, 6, ... 21 and the basement). */
 export const EGYPT_FRAGMENT_FLOORS = [2, 5, 8, 11, 14, 17, 20, 24] as const;
+
+export const EGYPT_TABLE: PyramidTable = { rows: EGYPT_ROWS, camps: EGYPT_CAMPS, secrets: EGYPT_SECRETS, fragmentFloors: EGYPT_FRAGMENT_FLOORS };

@@ -3,7 +3,8 @@ import type { GuardianRow } from './egypt';
 import { DIRS, TILE, distancesFrom, type Collapse, type Fixture, type GuardianPlan, type Item, type Layout, type Trap } from './floor';
 import type { Direction, GameState } from './game';
 import { bfsFrom, nearestOpen, reachable } from './graph';
-import { CARRY, radiusOf, radiusQ } from './lights';
+import { radiusQ } from './lights';
+import { handRadius, isFrozen } from './powers';
 import { createRng, nextRandom, shuffle } from './rng';
 import { emit, loseHand, recoilGuardian } from './runtime';
 import { pressPlate } from './traps';
@@ -329,7 +330,7 @@ function ensureDist(s: GameState, g: GuardianRun) {
 
 /** How far your light lets it see you, in tiles. */
 export function sightRange(s: GameState): number {
-  let r = s.hand.left > 0 ? 2 * radiusQ(radiusOf(CARRY[s.hand.kind], s.hand.left)) + 1 : 1.5;
+  let r = s.hand.left > 0 ? 2 * radiusQ(handRadius(s)) + 1 : 1.5;
   if (s.lightFixed[s.pos] >= 0.15 && r < FIXTURE_SIGHT) r = FIXTURE_SIGHT;
   return r;
 }
@@ -443,7 +444,7 @@ function snuff(s: GameState, g: GuardianRun) {
 /** An awake guardian on your tile: it smothers your light (a spare lights itself), or takes you on embers. */
 export function touchIfMet(s: GameState) {
   const g = s.guardian;
-  if (!g || s.status !== 'playing' || g.pos !== s.pos || !awake(g.mode)) return;
+  if (!g || s.status !== 'playing' || g.pos !== s.pos || !awake(g.mode) || (s.powers.length > 0 && isFrozen(s))) return;
   g.touches++;
   if (s.hand.left > 0) {
     loseHand(s);

@@ -40,6 +40,9 @@ export const PATTERNS = {
   found: P(4, [0, 'success']),
   star: P(4, [0, 'light']),
   wall: P(1, [0, 'light']),
+  power: P(5, [0, 'light'], [80, 'soft']),
+  freeze: P(6, [0, 'heavy'], [140, 'soft'], [320, 'soft']),
+  breathLow: P(5, [0, 'medium'], [150, 'light']),
 } as const satisfies Record<string, Pattern>;
 
 export type HapticName = keyof typeof PATTERNS;

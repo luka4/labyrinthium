@@ -22,7 +22,9 @@ const MAX_NOISES = 32;
  */
 export function noise(s: GameState, at: number, radius: number) {
   const g = s.guardian;
-  if (!g || g.mode === 'arriving' || g.mode === 'gone' || s.noises.length >= MAX_NOISES * 2) return;
+  if (s.noises.length >= MAX_NOISES * 2) return;
+  // plug-in hunters that listen (s.listening) get the queue too, even without a guardian
+  if (!s.listening && (!g || g.mode === 'arriving' || g.mode === 'gone')) return;
   s.noises.push(at, radius);
 }
 

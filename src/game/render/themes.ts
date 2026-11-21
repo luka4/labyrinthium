@@ -43,6 +43,8 @@ export type FloorTheme = {
   linenLight: string;
   mask: string;
   maskLight: string;
+  /** water colours (plan 06); absent = WATER_COLORS in drawWater.ts */
+  water?: { shallow: string; deep: string; flooded: string; edge: string };
 };
 
 const ROYAL: ReadonlySet<RoomKind> = new Set<RoomKind>(['burial', 'antechamber', 'shrine', 'stairsDown']);

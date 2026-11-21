@@ -174,3 +174,46 @@ The plan needs a Redmi 9 release APK for the globe frame rate and floor 24 with 
 - B. Implement everything; verify with tsc, expo-doctor, the check scripts, android and web exports and a web preview; add the device checks and the listening to PROCESS.md's "Checks only the user can do".
 
 **Picked: B.** It keeps the roadmap moving and leaves the user only the checks that need a phone or ears.
+
+## Implementation decisions
+
+Written by the task 06 implementation agent. Each: the problem, the options, the pick.
+
+### I1. The globe's land is drawn by our own projector, not by d3-geo's `geoPath`
+d3-geo's clipping and resampling cost 8 ms per frame on a desktop for the 5100 land vertices (the plan estimated 2-3 ms), i.e. 40+ ms on a Redmi 9. Options: (A) keep d3 and cache by quantised centre; (B) thin the data (still 4-5 ms); (C) a texture shader (rejected by Q23); (D) project the rings ourselves. **Picked D**: `src/game/world/projectLand.ts` flattens the rings to unit vectors once, projects them per frame (2 ms on a desktop, one SVG path string, one JSI call), cuts rings at the horizon and joins exits to entries with a Weiler-Atherton rule (the next entry clockwise on the limb, counter-clockwise for lake rings), skips rings behind the globe and specks under 0.6 degrees. `check-world.ts` compares it with `geoContains` on 19 views (worst mismatch 0.85 %, all from antimeridian slivers and the thinning of specks). d3-geo is still used for `geoInterpolate`, `geoDistance`, `geoContains`; the graticule is built by our own sampler. Unmeasured on a phone (PROCESS.md).
+
+### I2. Kits are split in two (data and drawing)
+The plan's single `PyramidKit` mixes data and Skia drawers; `scripts/check-audio.ts` runs the director in plain node, so importing the Skia drawers there would break it. **Picked**: `PyramidKit` (bed, story, hints, caption, feedback) in `src/kits/index.ts`, `RenderKit` (theme, hunters by `GuardianRow.kind`, draw hooks) in `src/kits/render.ts`; `kitFor` accepts any string. `storyOf` moved to `src/kits` (story.ts keeps only the data; a cycle otherwise). `BEDS` moved to `src/kits/beds.ts` and is re-exported by `audio/ambience.ts`.
+
+### I3. `splash` is a touch only
+The footsteps in water already play `water.wade` / `water.swim` (director surface choice); a `splash` sound on top doubled every entry. **Picked**: `splash` has the `stepSand` haptic only; `dive`, `surface`, `flooded`, `breathLow`, `drowned` have sounds as planned.
+
+### I4. The Mirror's lit-count check is made in open space
+The plan measured "floor 10's start", but the arrival stairwell is walled in (13 lit tiles with or without the Mirror). **Picked**: the check scans the floor for the open tile where radius 8 gains most over radius 5 (1.875 x on floor 10) and asserts >= 1.8x on `lightHand` there (not `light`, which also holds the previous position's fixed light).
+
+### I5. `water.ts` does not import `powers.ts`
+`powers.ts` needs the water levels (the murk) and `water.ts` needs "is the Naga active": a value cycle. **Picked**: `water.ts` inlines the Naga test; `powers.ts` imports `water.ts`.
+
+### I6. `waterSandbox` floods 3 tiles, not a corridor
+The sandbox floods the doorway of the deepest leaf room off the path plus up to 2 passage tiles before it (3 tiles on floor 3); the plan's "door tile and up to 2 passage tiles" is exactly that, but the passage tiles that lie on the main path are skipped, so some floors flood only the door.
+
+### I7. Power keys are the sockets in order
+Web keys 1-4 call `step({ type: 'power', power: POWER_ORDER[k] })`; a power you do not own is ignored by core, so the keys never shift when you own fewer than four.
+
+### I8. A frozen guardian stays a bump in every mode
+`move` bumps a guardian on `next` when it is dormant or waking, or when the Jade is active and it is awake (`patrol`, `hunt`, ...); a `gone` or `arriving` guardian is never on the floor. Noise from the bump is made only when not frozen.
+
+### I9. `setBusFilter` on the audio engine
+The Jade's "world bus 10 dB down with a 1.2 kHz low-pass" needs a per-bus filter the engine did not have. **Picked**: `AudioEngine.setBusFilter(bus, hz, ramp)` (a biquad low-pass between a bus's level and duck nodes in the audio-api engine; a no-op in the expo-audio fallback and the silent engine). The director holds the jade state and applies level and filter together with the overlay fade (`applyWorld`).
+
+### I10. Progress merge runs on every hydration
+`persist.merge` calls `reconcileRevisions` on the stored data after `migrate`, so a revision bump clears only that pyramid's camp, deepest floor and floor records; `revs` are stamped on first sight. `ownedPowers` lives in `migrateProgress.ts` (pure, so `check-progress.ts` can import it without AsyncStorage).
+
+### I11. Replay keys
+The committed keys are `powers:4`, `powers:17`, `powers:24` (floors 5, 18, 25) and `powers:sandbox` (3000 random actions, a power use about one action in ten, all four powers). Every existing snapshot key is unchanged (checked by `git diff` of `floors.snapshot.json`: only additions).
+
+### I12. The map's animation timeline
+Hold 400 ms, spark 1600 ms (the globe centre follows the arc through the `follow` prop, the pager scrolls to the Black card), socket 600 ms, 300 ms pause, door 1800 ms; the Black card's door is the same `drawSealDoor` as the pyramid page's. With reduced motion the final state shows at once with one `uiSound.seal()`. The globe redraws only while turning, coasting or animating, else 15 fps for the pulse (0 with reduced motion).
+
+### I13. Hidden checks
+`check-plugins.ts` registers `egypt-t`, `egypt-p`, `egypt-bad` and test plug-ins `test.pools`, `test.probe` globally for the checking process; nothing of them is in the game. The probe's `frozen` count is asserted at 59-61 ticks (float error of 0.1 s steps over 6 s).

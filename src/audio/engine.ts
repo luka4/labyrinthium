@@ -58,13 +58,17 @@ export function createAudioApiEngine(api: API): AudioEngine {
   clip.connect(ctx.destination);
 
   // ---- buses --------------------------------------------------------------------------------------
-  const bus = {} as Record<Bus, { level: AA.GainNode; duck: AA.GainNode }>;
+  const bus = {} as Record<Bus, { level: AA.GainNode; duck: AA.GainNode; filter: AA.BiquadFilterNode }>;
   for (const b of BUSES) {
     const level = ctx.createGain();
     const duck = ctx.createGain();
-    level.connect(duck);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 20000;
+    level.connect(filter);
+    filter.connect(duck);
     duck.connect(master);
-    bus[b] = { level, duck };
+    bus[b] = { level, duck, filter };
   }
   let vol: Volumes = { master: 1, sfx: 0.8, ambience: 0.7, muted: false };
   const overlay: Record<Bus, number> = { ambience: 1, world: 1, guardian: 1, ui: 1 };
@@ -286,6 +290,10 @@ export function createAudioApiEngine(api: API): AudioEngine {
     setBusLevel(b, level, ramp = 0.25) {
       overlay[b] = level;
       applyBus(b, Math.max(0.005, ramp / 3));
+    },
+
+    setBusFilter(b, hz, ramp = 0.3) {
+      smooth(bus[b].filter.frequency, hz > 0 ? hz : 20000, Math.max(0.005, ramp / 3));
     },
 
     setVolumes(v) {
