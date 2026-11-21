@@ -20,7 +20,10 @@
       },
       "predictiveBackGestureEnabled": false,
       "package": "com.labyrinthium.app",
-      "versionCode": 1
+      "versionCode": 1,
+      "permissions": [
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -49,6 +52,16 @@
     ],
     "owner": "luka4",
     "scheme": "labyrinthium",
-    "backgroundColor": "#0b0a08"
+    "backgroundColor": "#0b0a08",
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "a38ccc00-d3f0-4aeb-859d-eda17e67d4c5"
+      }
+    }
   }
 }
