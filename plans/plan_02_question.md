@@ -156,3 +156,50 @@ Each answer: picked option and a one-line reason. Implementation agents append b
 - A. Arrows only. B. Arrows/WASD with hold (ignoring OS repeat), Shift+dir run, Esc/P pause.
 
 **Picked: B.** Same feel as touch, standard bindings.
+
+## Implementation decisions
+
+Each: options and the pick. Plan 02 was written before task 01 was implemented; these adapt it to the real code.
+
+### I1. Brazier tiles before the masks, other lights after
+- A. Everything in one `placeLights` after the main path (plan). B. `placeBraziers` right after the hooks (before `solid`/`opaque`/`dist`/main path are derived), `placeLights` (items, sconces, shrine candles) after the main path.
+**Picked: B.** A brazier is a solid tile: placing it after `dist` and the main path would invalidate the stairs-distance invariant and the path. Placed early, a BFS guard reverts any brazier that cuts the floor, and everything downstream (spots, items) sees the final masks.
+
+### I2. Camp information in the generator
+- A. Generator learns `pyramid.campEvery` via the hook context. B. `GenSpec.camp?: boolean`, set by `floorFor` (inlined the camp rule; `game.ts` imports `generate.ts`, so importing `isCampFloor` back would be a cycle).
+**Picked: B.** The check script passes `camp` too.
+
+### I3. Guaranteed oil jar placed first
+- A. Fill the budget, then swap an item into a jar if none (plan). B. Place one jar first (a real spot if possible), then fill the budget.
+**Picked: B.** With A a single big torch could cover the budget and be converted, leaving floor 10 with one jar and nothing else.
+
+### I4. Where the shrine fixture lives
+Task 01's shrine spot tile is the open niche tile, which is a plain FLOOR tile (not `TILE.NICHE`). Shrine candles use the spot tile; from floor 3 the shrine spot gets no item.
+
+### I5. Sconces
+Only in horizontal runs (north wall is ROCK), middle of a >= 6 tile passage run or the first tile inside a door of a hall/gallery/chamber. Vertical passages therefore get none; fine, sconces stay landmarks. Sprite sits on the wall face (the rock tile above), flame and soot above it.
+
+### I6. Brazier placement details
+Hall: even-offset tile nearest the hall centre with 4 open FLOOR neighbours. Camp landing: first orthogonal neighbour of `start` that keeps connectivity. Burial: two eternal braziers flanking the far sarcophagus tile (falling back to the near one). The old render-only camp brazier in `drawGame` is gone (it is a fixture now).
+
+### I7. Frame delivery
+- A. `Picture` fed by a Reanimated shared value (plan). B. The fallback named in the plan: a memoised `Board` component with its own `picture` state, redrawn from the screen's rAF loop.
+**Picked: B.** Sharing a Skia host object through Reanimated is unverifiable here (no device/browser); B is the known-good path and still avoids re-rendering `GameScreen` per frame (only `Board`, which is a Canvas and a Picture). HUD text is a separate small state at <= 4 Hz.
+
+### I8. Smooth motion
+Player and light slide linearly over the 0.15 s step (no separate ease-out for an isolated step). Camera easing from task 01 unchanged. Redraw: every frame while walking or the camera moves, 30 fps when standing still (flames), nothing while an overlay is up.
+
+### I9. Idle redraw rate
+Plan said 60 fps while playing; picked 30 fps when idle because the picture and mask upload cost JS time on a Redmi 9 and flames read fine at 30. Walking and camera motion are full rate.
+
+### I10. runDir signature
+`runDir(floor, pos, dir, interesting)` takes a predicate for "item or unlit fixture next to this tile" instead of the whole state (keeps `walk.ts` independent of `GameState`). The walker supplies it. The first step of a run is the swipe's own move.
+
+### I11. Embers carry across floors
+`continue` carries the `ember` counter when the hand source is dead; a camp always relights.
+
+### I12. Check script additions and what was not done
+Added `scripts/check-light-rules.ts` (rules, memory, walk, replay on Egypt floors 1/5/10, bot report) and placement asserts in `check-floors.ts` (items, spacing, minFloor, main-path teaching items on floors 1-2 only, oil jar per floor, sconce wall and spacing, eternal braziers on camps and the burial chamber, shrine candles). Not asserted: the plan's "found seconds within [budget, budget + 100]" (the budget is a soft target; the jar and teaching items add to it). The bot (walks 0.3 s per tile, explores until the stairs are seen, takes useful items within 8 steps, never swaps) never burns out on floors 1-7, ends floors 1-3 with 95-170 s, and burns out on floors 8-10 in some of 16 seeds; `secPerTile` left as in the plan table.
+
+### I13. Headless render check
+`drawGame`, `drawLightHud`, the sprites and the light mask were rendered to PNG in Node with canvaskit-wasm behind the RN-Skia web bindings (throwaway harness in the scratchpad, not committed): camp brazier with the torch bearer, a wall sconce, all sprites at 120 px per tile, the strip. No device or browser run: touch feel, hold/flick tuning, 60 fps on a Redmi 9 and the web keyboard are unverified.

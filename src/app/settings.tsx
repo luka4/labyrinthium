@@ -41,6 +41,12 @@ export default function SettingsScreen() {
             ]}
             onChange={(controls) => settings.set({ controls })}
           />
+          <ToggleRow
+            label="Flick to run"
+            note="A quick flick runs to the next junction. Holding a swipe or the keyboard (arrows, WASD, Shift to run) walks on."
+            value={settings.autoRun}
+            onChange={(autoRun) => settings.set({ autoRun })}
+          />
         </Section>
 
         <Section title="Motion">

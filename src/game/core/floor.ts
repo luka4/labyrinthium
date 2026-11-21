@@ -1,5 +1,6 @@
 import type { ArchProfileId } from './architecture';
 import type { Pyramid } from './game';
+import type { FixtureKind, ItemKind } from './lights';
 
 /**
  * A floor is a square tile grid built from an architectural plan (see generate.ts):
@@ -18,12 +19,13 @@ export const TILE = {
   STAIRS_UP: 6,
   BENCH: 7,
   SARCOPHAGUS: 8,
+  BRAZIER: 9,
 } as const;
 export type TileKind = (typeof TILE)[keyof typeof TILE];
 
 /** Per-kind flags, indexed by TILE value. Grow the tables when adding kinds. */
-export const TILE_SOLID = Uint8Array.of(1, 0, 0, 1, 0, 0, 1, 1, 1); // blocks movement
-export const TILE_OPAQUE = Uint8Array.of(1, 0, 0, 1, 0, 0, 0, 0, 0); // blocks light
+export const TILE_SOLID = Uint8Array.of(1, 0, 0, 1, 0, 0, 1, 1, 1, 1); // blocks movement
+export const TILE_OPAQUE = Uint8Array.of(1, 0, 0, 1, 0, 0, 0, 0, 0, 0); // blocks light
 
 export type RoomKind =
   | 'passage'
@@ -57,8 +59,16 @@ export type Room = {
 };
 
 export type SpotKind = 'deadEnd' | 'store' | 'niche' | 'shrine';
-/** A place where later systems (oil, light sources, traps) may put things. */
+/** A place where later systems (light sources, traps) may put things. */
 export type Spot = { tile: number; kind: SpotKind; room: number; dist: number; main: boolean };
+
+/** Something lying on the floor to pick up; `spot` says where the generator found the place. */
+export type Item = { tile: number; kind: ItemKind; spot: SpotKind | 'wayside' };
+/**
+ * A fixed light. sconce: `tile` is the open tile in front of a wall face (`wall`: 3 = the wall to the north);
+ * brazier: its own BRAZIER tile; shrineCandles: the shrine niche tile. eternal = pre-lit, never burns down.
+ */
+export type Fixture = { tile: number; kind: FixtureKind; wall: number | null; eternal: boolean };
 
 export type Lattice = { n: number; colX: number[]; rowY: number[]; axisX: number[]; axisY: number[] };
 
@@ -78,8 +88,10 @@ export type Floor = {
   start: number;
   /** goal: the STAIRS_DOWN tile, or the artifact tile in the basement */
   stairs: number;
-  /** tile indices with an oil jar */
-  oil: number[];
+  /** things to pick up (light sources, oil jars) */
+  items: Item[];
+  /** sconces, braziers, shrine candles */
+  fixtures: Fixture[];
   spots: Spot[];
   /** tiles from start to stairs */
   mainPath: Int32Array;

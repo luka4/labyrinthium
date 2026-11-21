@@ -29,8 +29,8 @@ export type ArchProfile = {
   junctionRoom: number;
   /** chance per eligible straight passage tile to get a niche */
   nicheRate: number;
-  /** one oil jar per N open tiles (min 1) */
-  oilPerTiles: number;
+  /** found light per open tile in seconds, by floor index (last value repeats) */
+  lights: { secPerTile: readonly number[] };
   basementRoom: RoomKind;
   /** post-carve passes; each gets its own rng stream */
   hooks?: Array<(ctx: GenContext) => void>;
@@ -47,7 +47,7 @@ const EGYPT: ArchProfile = {
   leafRooms: { chamber: 5, magazines: 3, shrine: 2 },
   junctionRoom: 0.3,
   nicheRate: 0.06,
-  oilPerTiles: 70,
+  lights: { secPerTile: [0.3, 0.28, 0.26, 0.24, 0.22, 0.2, 0.18, 0.16, 0.15, 0.14] },
   basementRoom: 'burial',
 };
 
@@ -72,6 +72,8 @@ export type GenSpec = {
   seed: number;
   floorIndex: number;
   basement: boolean;
+  /** a camp floor: an eternal brazier burns beside the landing */
+  camp?: boolean;
   profile: ArchProfileId;
   /** the previous floor's stairs in world coordinates (floor centre = 0,0); null on the top floor */
   arrivalWorld: { x: number; y: number } | null;

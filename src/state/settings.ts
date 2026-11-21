@@ -11,6 +11,8 @@ type SettingsData = {
   /** stored now, used once the game has sound */
   sound: boolean;
   controls: Controls;
+  /** a flick runs on to the next junction */
+  autoRun: boolean;
   motion: MotionSetting;
 };
 
@@ -24,6 +26,7 @@ export const useSettings = create<SettingsData & SettingsActions>()(
       haptics: true,
       sound: true,
       controls: 'both',
+      autoRun: true,
       motion: 'system',
       set: (patch) => set(patch),
     }),
@@ -31,7 +34,7 @@ export const useSettings = create<SettingsData & SettingsActions>()(
       name: 'labyrinthium.settings',
       version: 1,
       storage: createJSONStorage(() => AsyncStorage),
-      partialize: ({ haptics, sound, controls, motion }) => ({ haptics, sound, controls, motion }),
+      partialize: ({ haptics, sound, controls, autoRun, motion }) => ({ haptics, sound, controls, autoRun, motion }),
     },
   ),
 );

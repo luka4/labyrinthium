@@ -16,10 +16,12 @@ import {
   distancesFrom,
   floorSeed,
   type Floor,
+  type Fixture,
   type RoomKind,
   type Spot,
 } from './floor';
 import type { Pyramid } from './game';
+import { placeBraziers, placeLights } from './placeLights';
 import { createRng, shuffle } from './rng';
 
 /**
@@ -27,7 +29,7 @@ import { createRng, shuffle } from './rng';
  * Hermes, V8 and a future server build bit-identical floors.
  *
  * site lattice -> spanning tree (+ loops) -> merged halls and galleries -> room kinds
- * -> per-kind carvers -> niches -> hooks -> derived masks, main path, oil.
+ * -> per-kind carvers -> niches -> hooks -> brazier tiles -> derived masks, main path -> light sources.
  * Three rng streams (layout, rooms, items) so tuning one stage leaves the others alone.
  */
 
@@ -374,6 +376,16 @@ export function generateFloor(spec: GenSpec): Floor {
     ctx.rng = createRng(spec.seed ^ Math.imul(k + 1, 0x27d4eb2d));
     hook(ctx);
   });
+  const fixtures: Fixture[] = placeBraziers({
+    tiles,
+    roomOf,
+    rooms,
+    size,
+    start: ctx.marks.start,
+    stairs: ctx.marks.stairs,
+    floorIndex,
+    camp: !!spec.camp,
+  });
   const solid = new Uint8Array(size * size);
   const opaque = new Uint8Array(size * size);
   for (let i = 0; i < tiles.length; i++) {
@@ -425,27 +437,26 @@ export function generateFloor(spec: GenSpec): Floor {
     sp.main = !!onPath[sp.tile];
   }
 
-  // 11. oil jars on spots off the main path, spaced apart ---------------------------
-  let openTiles = 0;
-  for (let i = 0; i < solid.length; i++) if (!solid[i] && tiles[i] !== TILE.ROCK) openTiles++;
-  const wanted = Math.max(1, Math.round(openTiles / profile.oilPerTiles));
-  const oil: number[] = [];
-  const spaced = (t: number, gap: number) =>
-    oil.every((o) => Math.abs((o % size) - (t % size)) + Math.abs(Math.floor(o / size) - Math.floor(t / size)) >= gap);
-  const usable = (sp: { tile: number; room: number }) =>
-    sp.room !== arrivalRoom && sp.room !== stairsRoom && !onPath[sp.tile] && dist[sp.tile] >= 0;
-  for (const sp of shuffle(spots.filter(usable), itemsRng)) {
-    if (oil.length >= wanted) break;
-    if (spaced(sp.tile, 6)) oil.push(sp.tile);
-  }
-  if (!oil.length) {
-    // no spot qualified (a corridor-like tree): any quiet floor tile off the path
-    const fallback: number[] = [];
-    for (let i = 0; i < tiles.length; i++)
-      if (!solid[i] && tiles[i] !== TILE.ROCK && !onPath[i] && dist[i] > 0 && roomOf[i] !== arrivalRoom && roomOf[i] !== stairsRoom) fallback.push(i);
-    const pool = fallback.length ? fallback : [start];
-    oil.push(shuffle(pool, itemsRng)[0]);
-  }
+  // 11. light sources: found items, sconces, shrine candles ---------------------------
+  const lights = placeLights({
+    profile,
+    size,
+    tiles,
+    solid,
+    roomOf,
+    rooms,
+    spots,
+    dist,
+    onPath,
+    mainPath,
+    arrivalRoom,
+    stairsRoom,
+    start,
+    stairs,
+    floorIndex,
+    rng: itemsRng,
+  });
+  fixtures.push(...lights.sconces, ...lights.shrines);
 
   return {
     size,
@@ -457,7 +468,8 @@ export function generateFloor(spec: GenSpec): Floor {
     links,
     start,
     stairs,
-    oil,
+    items: lights.items,
+    fixtures,
     spots,
     mainPath,
     lattice,
@@ -487,6 +499,7 @@ export function floorFor(pyramid: Pyramid, floorIndex: number): Floor {
     seed: floorSeed(pyramid, floorIndex),
     floorIndex,
     basement: floorIndex === pyramid.floorCount - 1,
+    camp: pyramid.campEvery > 0 && floorIndex > 0 && (floorIndex + 1) % pyramid.campEvery === 0,
     profile: pyramid.architecture,
     arrivalWorld,
   });

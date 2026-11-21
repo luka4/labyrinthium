@@ -11,6 +11,8 @@ import { profileFor } from '../src/game/core/architecture';
 import { DIRS, TILE, distancesFrom, type Floor, type RoomKind } from '../src/game/core/floor';
 import { generateFloor } from '../src/game/core/generate';
 import { floorFor } from '../src/game/core/generate';
+import { CARRY } from '../src/game/core/lights';
+import { runLightChecks } from './check-light-rules';
 import { floorSeed, isCampFloor, lastCamp } from '../src/game/core/game';
 import { PYRAMIDS, SEALS, type PyramidId } from '../src/game/core/pyramids';
 
@@ -28,7 +30,10 @@ const GLYPH: Record<number, string> = {
   [TILE.STAIRS_UP]: '<',
   [TILE.BENCH]: 'b',
   [TILE.SARCOPHAGUS]: 'S',
+  [TILE.BRAZIER]: 'k',
 };
+
+const ITEM_GLYPH: Record<string, string> = { smallTorch: 't', torch: 'T', bigTorch: 'B', lamp: 'l', candle: 'i', oilJar: 'o' };
 
 function ascii(f: Floor): string {
   const rows: string[] = [];
@@ -36,7 +41,9 @@ function ascii(f: Floor): string {
     let row = '';
     for (let x = 0; x < f.size; x++) {
       const i = y * f.size + x;
-      row += i === f.start ? '@' : f.oil.includes(i) ? '*' : i === f.stairs && f.tiles[i] === TILE.FLOOR ? 'A' : GLYPH[f.tiles[i]];
+      const it = f.items.find((o) => o.tile === i);
+      const fx = f.fixtures.find((o) => o.tile === i && o.kind !== 'brazier');
+      row += i === f.start ? '@' : it ? ITEM_GLYPH[it.kind] : fx ? (fx.kind === 'sconce' ? 's' : 'c') : i === f.stairs && f.tiles[i] === TILE.FLOOR ? 'A' : GLYPH[f.tiles[i]];
     }
     rows.push(row);
   }
@@ -50,7 +57,11 @@ function fnv(f: Floor): string {
     h = Math.imul(h, 0x01000193) >>> 0;
   };
   for (const t of f.tiles) mix(t);
-  for (const v of [f.start, f.stairs, ...f.oil]) for (let b = 0; b < 4; b++) mix(v >> (8 * b));
+  const ids = ['smallTorch', 'torch', 'bigTorch', 'lamp', 'candle', 'oilJar', 'sconce', 'brazier', 'shrineCandles'];
+  const nums = [f.start, f.stairs];
+  for (const it of f.items) nums.push(it.tile, ids.indexOf(it.kind));
+  for (const fx of f.fixtures) nums.push(fx.tile, ids.indexOf(fx.kind), fx.eternal ? 1 : 0);
+  for (const v of nums) for (let b = 0; b < 4; b++) mix(v >> (8 * b));
   return h.toString(16).padStart(8, '0');
 }
 
@@ -58,7 +69,7 @@ if (args[0] === '--ascii') {
   const id = (args[1] ?? 'egypt') as PyramidId;
   const index = Number(args[2] ?? 1) - 1;
   const f = floorFor(PYRAMIDS[id], index);
-  console.log(`${id} floor ${index + 1}: size ${f.size}, rooms ${f.rooms.length}, loops ${f.loops}, oil ${f.oil.length}`);
+  console.log(`${id} floor ${index + 1}: size ${f.size}, rooms ${f.rooms.length}, loops ${f.loops}, items ${f.items.length} fixtures ${f.fixtures.length}`);
   console.log(ascii(f));
   console.log(f.rooms.map((r) => `${r.id}:${r.kind}`).join(' '));
   process.exit(0);
@@ -77,8 +88,60 @@ const warn = (msg: string) => {
 
 type Metrics = { open: number; kinds: Record<string, number>; run: number; roomShare: number; thick: number };
 
+const MIN_FLOOR: Record<string, number> = { smallTorch: 1, torch: 2, bigTorch: 5, lamp: 3, candle: 1, oilJar: 1 };
+const manhattan = (size: number, a: number, b: number) => Math.abs((a % size) - (b % size)) + Math.abs(Math.floor(a / size) - Math.floor(b / size));
+let foundTotal = 0;
+let floorsChecked = 0;
+
+/** Placement assertions (plan 02). */
+function checkLights(label: string, f: Floor, floorIndex: number, basement: boolean, camp: boolean, path: Set<number>, dist: Int32Array) {
+  const size = f.size;
+  const seen = new Set<number>();
+  let found = 0;
+  let onPath = 0;
+  let jars = 0;
+  for (const it of f.items) {
+    if (f.solid[it.tile] || f.tiles[it.tile] === TILE.ROCK || dist[it.tile] < 0) fail(`${label}: item ${it.kind} not on a reachable open tile`);
+    if (it.tile === f.stairs || it.tile === f.start) fail(`${label}: item on start or stairs`);
+    if (seen.has(it.tile)) fail(`${label}: two items on one tile`);
+    seen.add(it.tile);
+    if (path.has(it.tile)) onPath++;
+    if (it.kind === 'oilJar') jars++;
+    if (floorIndex + 1 < MIN_FLOOR[it.kind]) fail(`${label}: ${it.kind} below its minimum floor`);
+    found += it.kind === 'oilJar' ? 60 : CARRY[it.kind].seconds;
+  }
+  for (let a = 0; a < f.items.length; a++)
+    for (let b = a + 1; b < f.items.length; b++) {
+      const d = manhattan(size, f.items[a].tile, f.items[b].tile);
+      if (d < 5) fail(`${label}: item spacing ${d}`);
+    }
+  if (jars < 1) fail(`${label}: no oil jar`);
+  if (onPath !== (floorIndex < 2 ? 1 : 0)) fail(`${label}: ${onPath} items on the main path`);
+  const budget = Math.round(f.items.length ? 0 : 0);
+  void budget;
+  const sconces = f.fixtures.filter((x) => x.kind === 'sconce');
+  for (const sc of sconces) {
+    if (f.tiles[sc.tile - size] !== TILE.ROCK) fail(`${label}: sconce without a wall`);
+    if (f.solid[sc.tile] || dist[sc.tile] < 0) fail(`${label}: sconce tile not reachable`);
+    if (sc.tile === f.start || sc.tile === f.stairs) fail(`${label}: sconce on start or stairs`);
+  }
+  for (let a = 0; a < sconces.length; a++)
+    for (let b = a + 1; b < sconces.length; b++) if (manhattan(size, sconces[a].tile, sconces[b].tile) < 7) fail(`${label}: sconce spacing`);
+  if (floorIndex < 1 && sconces.length) fail(`${label}: sconces on floor 1`);
+  const eternal = f.fixtures.filter((x) => x.kind === 'brazier' && x.eternal).length;
+  for (const fx of f.fixtures) if (fx.kind === 'brazier' && f.tiles[fx.tile] !== TILE.BRAZIER) fail(`${label}: brazier fixture without BRAZIER tile`);
+  if (camp && eternal < 1) fail(`${label}: no eternal brazier on a camp floor`);
+  if (basement && eternal < 2) fail(`${label}: burial chamber has ${eternal} eternal braziers (want 2)`);
+  if (floorIndex >= 2) {
+    const shrines = f.spots.filter((x) => x.kind === 'shrine').length;
+    if (f.fixtures.filter((x) => x.kind === 'shrineCandles').length !== shrines) fail(`${label}: shrine candles missing`);
+  }
+  foundTotal += found;
+  floorsChecked++;
+}
+
 /** Structural assertions for one floor. */
-function check(label: string, f: Floor, basement: boolean, floorIndex: number): Metrics {
+function check(label: string, f: Floor, basement: boolean, floorIndex: number, camp = false): Metrics {
   const solid = f.solid;
   const dist = distancesFrom(solid, f.size, f.start);
   let open = 0;
@@ -98,16 +161,7 @@ function check(label: string, f: Floor, basement: boolean, floorIndex: number): 
   const maxDist = Math.max(...dist);
   if (dist[f.stairs] < 0.6 * maxDist) fail(`${label}: stairs dist ${dist[f.stairs]} < 0.6 x ${maxDist}`);
   const path = new Set(f.mainPath);
-  if (f.oil.length < 1) fail(`${label}: no oil`);
-  for (const o of f.oil) {
-    if (path.has(o)) fail(`${label}: oil on main path`);
-    if (solid[o] || dist[o] < 0) fail(`${label}: oil not reachable`);
-  }
-  for (let a = 0; a < f.oil.length; a++)
-    for (let b = a + 1; b < f.oil.length; b++) {
-      const d = Math.abs((f.oil[a] % f.size) - (f.oil[b] % f.size)) + Math.abs(Math.floor(f.oil[a] / f.size) - Math.floor(f.oil[b] / f.size));
-      if (d < 6) fail(`${label}: oil spacing ${d}`);
-    }
+  checkLights(label, f, floorIndex, basement, camp, path, dist);
   if (f.tiles[f.start] === TILE.ROCK || solid[f.start]) fail(`${label}: start is not open`);
   for (let i = 0; i < f.size; i++)
     for (const j of [i, (f.size - 1) * f.size + i, i * f.size, i * f.size + f.size - 1])
@@ -157,7 +211,6 @@ function check(label: string, f: Floor, basement: boolean, floorIndex: number): 
         }
       }
     }
-  void floorIndex;
   return { open, kinds, run: runs ? runTiles / runs : 0, roomShare: roomTiles / open, thick: gaps ? gapTiles / gaps : 0 };
 }
 
@@ -170,7 +223,7 @@ const old: Record<string, string> = (() => {
   }
 })();
 
-console.log('pyramid floor size open rooms(by kind) mainPath loops oil run room% thick ms');
+console.log('pyramid floor size open rooms(by kind) mainPath loops items+fixtures run room% thick ms');
 let genMs = 0;
 let genCount = 0;
 for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
@@ -184,6 +237,7 @@ for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
       seed: floorSeed(p, i),
       floorIndex: i,
       basement: i === p.floorCount - 1,
+      camp: isCampFloor(p, i),
       profile: p.architecture,
       arrivalWorld: i === 0 ? null : (() => {
         const above = floorFor(p, i - 1);
@@ -197,12 +251,12 @@ for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
     if (fnv(again) !== h) fail(`${label}: not deterministic`);
     snapshot[`${id}:${i}`] = h;
     if (old[`${id}:${i}`] && old[`${id}:${i}`] !== h && !args.includes('--update')) fail(`${label}: snapshot changed ${old[`${id}:${i}`]} -> ${h} (npm run check:floors -- --update)`);
-    const m = check(label, f, i === p.floorCount - 1, i);
+    const m = check(label, f, i === p.floorCount - 1, i, isCampFloor(p, i));
     const kinds = Object.entries(m.kinds)
       .map(([k, v]) => `${k}:${v}`)
       .join(',');
     console.log(
-      `${id} ${i + 1} ${f.size} ${m.open} ${f.rooms.length}(${kinds}) ${f.mainPath.length} ${f.loops} ${f.oil.length} ${m.run.toFixed(1)} ${(m.roomShare * 100).toFixed(0)} ${m.thick.toFixed(1)}`,
+      `${id} ${i + 1} ${f.size} ${m.open} ${f.rooms.length}(${kinds}) ${f.mainPath.length} ${f.loops} ${f.items.length}+${f.fixtures.length} ${m.run.toFixed(1)} ${(m.roomShare * 100).toFixed(0)} ${m.thick.toFixed(1)}`,
     );
     if (id === 'egypt') {
       if (i < 3 && f.loops !== 0) fail(`${label}: loops on an early floor`);
@@ -221,8 +275,8 @@ let loopFloors = 0;
 for (let seed = 1; seed <= 300; seed++) {
   let world: { x: number; y: number } | null = null;
   for (let i = 0; i < egypt.floorCount; i++) {
-    const f = generateFloor({ seed: seed * 7919 + i * 104729, floorIndex: i, basement: i === egypt.floorCount - 1, profile: 'egypt', arrivalWorld: world });
-    check(`egypt seed ${seed} floor ${i + 1}`, f, i === egypt.floorCount - 1, i);
+    const f = generateFloor({ seed: seed * 7919 + i * 104729, floorIndex: i, basement: i === egypt.floorCount - 1, camp: isCampFloor(egypt, i), profile: 'egypt', arrivalWorld: world });
+    check(`egypt seed ${seed} floor ${i + 1}`, f, i === egypt.floorCount - 1, i, isCampFloor(egypt, i));
     if (i < 3 && f.loops) fail(`egypt seed ${seed} floor ${i + 1}: loops on an early floor`);
     if (seed === 1 && i >= 7 && f.loops > 0) loopFloors++;
     world = { x: (f.stairs % f.size) - (f.size >> 1), y: Math.floor(f.stairs / f.size) - (f.size >> 1) };
@@ -231,6 +285,8 @@ for (let seed = 1; seed <= 300; seed++) {
   if (failures > 40) break;
 }
 if (loopFloors < 2) fail('loops: fewer than 2 of egypt floors 8-10 have loop edges');
+
+runLightChecks({ fail, warn });
 
 // camps
 const campIndices = Array.from({ length: egypt.floorCount }, (_, i) => i).filter((i) => isCampFloor(egypt, i));

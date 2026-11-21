@@ -1,16 +1,28 @@
 import type { ArchProfileId } from './architecture';
 import { DIRS, floorSeed, type Floor } from './floor';
 import { floorFor } from './generate';
-import { computeLight, torchRadius } from './vision';
+import {
+  BAG_SIZE,
+  CARRY,
+  EMBER,
+  FIXTURE,
+  LOW_SECONDS,
+  OIL_MIN_GAIN,
+  STEP_SECONDS,
+  fixtureRadius,
+  radiusOf,
+  radiusQ,
+  type Carried,
+  type FixtureKind,
+  type ItemKind,
+} from './lights';
+import { clearLine, computeLight } from './vision';
 
 /**
  * Deterministic game core: no React, no rendering. The same seed and the same
  * sequence of actions always give the same result, which later makes ghosts,
  * replays, server-side checks and real-time multiplayer possible.
  */
-
-export const TORCH_SECONDS = 45;
-export const EMBER_SECONDS = 6;
 
 export type Direction = 0 | 1 | 2 | 3; // index into DIRS: right, left, down, up
 
@@ -28,34 +40,74 @@ export type Pyramid = {
 /** escaped: the artifact on the basement floor was taken */
 export type Status = 'playing' | 'descending' | 'burntOut' | 'escaped';
 
+/** What the UI may react to (captions, haptics). Only the last EVENT_LOG are kept. */
+export type GameEvent = {
+  seq: number;
+  type: 'pickup' | 'refill' | 'lit' | 'bagFull' | 'autoLight' | 'swap' | 'lowLight';
+  kind: ItemKind | FixtureKind;
+};
+const EVENT_LOG = 8;
+
+/** Something lying on the floor: a light source with its seconds, or an oil jar. */
+export type Lying = { kind: ItemKind; left: number };
+
+/** How far a fixed light can be seen through open line of sight, in tiles. */
+export const FIXED_SIGHT = 12;
+
 export type GameState = {
   pyramid: Pyramid;
   floorIndex: number;
   floor: Floor;
   pos: number;
-  /** 0..1 */
-  fuel: number;
-  /** seconds spent on embers after the fuel ran out */
+  /** the source in your hand; left <= 0 means embers: you still hold the burnt-out source */
+  hand: Carried;
+  bag: Carried[];
+  /** seconds spent on embers */
   ember: number;
   steps: number;
-  /** torch starts burning on the first move */
+  /** the light burns from the first move */
   burning: boolean;
   status: Status;
-  oil: Set<number>;
-  seen: Uint8Array;
-  walked: Uint8Array;
+  /** tile -> what still lies there */
+  items: Map<number, Lying>;
+  /** per fixture: -1 unlit, > 0 seconds left, 0 burnt out, Infinity eternal */
+  fixtureLeft: Float32Array;
+  /** per fixture: radius (quantised) of its current light */
+  fixtureR: Float32Array;
+  /** seconds until the next move is allowed (>= -STEP_SECONDS) */
+  cooldown: number;
+  /** successful moves on this floor: the memory clock */
+  trail: number;
+  /** per tile: trail when last lit (-1 never) */
+  seenAt: Int32Array;
+  /** per tile: trail when last stood on (-1 never) */
+  walkedAt: Int32Array;
+  /** 0..1 from the hand source */
+  lightHand: Float32Array;
+  /** 0..1 union of lit fixtures, before line of sight to the player */
+  lightFixed: Float32Array;
+  /** lit fixtures you can see from where you stand */
+  lightSeen: Float32Array;
+  /** what the player sees now */
   light: Float32Array;
+  events: GameEvent[];
+  eventSeq: number;
+  /** quantised radius of the hand light now */
+  handR: number;
+  fixedDirty: boolean;
+  lowWarned: boolean;
 };
 
 export type Action =
   | { type: 'move'; dir: Direction }
   | { type: 'tick'; seconds: number }
+  | { type: 'swap'; slot: number }
   | { type: 'continue' }
   | { type: 'retry' };
 
 export { floorSeed };
 
-/** Camps save progress and refill the torch: every floor whose 1-based number divides by `campEvery`. */
+/** Camps save progress and refill the light: every floor whose 1-based number divides by `campEvery`. */
 export function isCampFloor(pyramid: Pyramid, floorIndex: number): boolean {
   return pyramid.campEvery > 0 && floorIndex > 0 && (floorIndex + 1) % pyramid.campEvery === 0;
 }
@@ -70,78 +122,258 @@ export function isBasement(pyramid: Pyramid, floorIndex: number): boolean {
   return floorIndex === pyramid.floorCount - 1;
 }
 
-export function startFloor(pyramid: Pyramid, floorIndex: number, fuel = 1, steps = 0): GameState {
+export const startHand = (): Carried => ({ kind: 'torch', left: CARRY.torch.seconds });
+
+export function startFloor(pyramid: Pyramid, floorIndex: number, hand: Carried = startHand(), bag: Carried[] = [], steps = 0, ember = 0): GameState {
   const floor = floorFor(pyramid, floorIndex);
   const tiles = floor.size * floor.size;
+  const items = new Map<number, Lying>();
+  for (const it of floor.items) items.set(it.tile, { kind: it.kind, left: it.kind === 'oilJar' ? 0 : CARRY[it.kind].seconds });
+  const fixtureLeft = new Float32Array(floor.fixtures.length);
+  floor.fixtures.forEach((f, i) => (fixtureLeft[i] = f.eternal ? Infinity : -1));
   const state: GameState = {
     pyramid,
     floorIndex,
     floor,
     pos: floor.start,
-    fuel,
-    ember: 0,
+    hand: { ...hand },
+    bag: bag.map((b) => ({ ...b })),
+    ember,
     steps,
     burning: false,
     status: 'playing',
-    oil: new Set(floor.oil),
-    seen: new Uint8Array(tiles),
-    walked: new Uint8Array(tiles),
+    items,
+    fixtureLeft,
+    fixtureR: new Float32Array(floor.fixtures.length).fill(-1),
+    cooldown: 0,
+    trail: 0,
+    seenAt: new Int32Array(tiles).fill(-1),
+    walkedAt: new Int32Array(tiles).fill(-1),
+    lightHand: new Float32Array(tiles),
+    lightFixed: new Float32Array(tiles),
+    lightSeen: new Float32Array(tiles),
     light: new Float32Array(tiles),
+    events: [],
+    eventSeq: 0,
+    handR: -1,
+    fixedDirty: true,
+    lowWarned: false,
   };
-  state.walked[floor.start] = 1;
-  relight(state);
+  state.walkedAt[floor.start] = 0;
+  relight(state, true);
   return state;
 }
 
-function relight(s: GameState) {
-  computeLight(s.floor, s.pos, torchRadius(s.fuel), s.light);
-  for (let i = 0; i < s.light.length; i++) if (s.light[i] > 0) s.seen[i] = 1;
+function emit(s: GameState, type: GameEvent['type'], kind: GameEvent['kind']) {
+  s.events.push({ seq: ++s.eventSeq, type, kind });
+  if (s.events.length > EVENT_LOG) s.events.shift();
+}
+
+function setHand(s: GameState, hand: Carried) {
+  s.hand = hand;
+  s.ember = 0;
+  s.lowWarned = false;
+}
+
+/**
+ * Recomputes light when something changed: the hand radius (quantised to 1/8 tile), a
+ * fixture that lit, changed radius or went out, or a move. Never per frame by default.
+ */
+function relight(s: GameState, moved: boolean) {
+  const { floor } = s;
+  const r = s.hand.left > 0 ? radiusOf(CARRY[s.hand.kind], s.hand.left) : EMBER.radius;
+  const q = radiusQ(r);
+  const handChanged = moved || q !== s.handR;
+  if (handChanged) {
+    computeLight(floor, s.pos, q, s.hand.left > 0 ? CARRY[s.hand.kind].falloff : EMBER.falloff, s.lightHand);
+    s.handR = q;
+  }
+  const dirty = s.fixedDirty;
+  if (dirty) {
+    s.lightFixed.fill(0);
+    floor.fixtures.forEach((f, i) => {
+      const left = s.fixtureLeft[i];
+      if (left <= 0) return;
+      const fr = radiusQ(fixtureRadius(f.kind, left));
+      s.fixtureR[i] = fr;
+      computeLight(floor, f.tile, fr, FIXTURE[f.kind].falloff, s.lightFixed, true);
+    });
+    s.fixedDirty = false;
+  }
+  if (!handChanged && !dirty) return;
+  if (moved || dirty) {
+    const { size } = floor;
+    const px = s.pos % size;
+    const py = (s.pos - px) / size;
+    for (let i = 0; i < s.lightFixed.length; i++) {
+      const v = s.lightFixed[i];
+      if (v <= 0) {
+        s.lightSeen[i] = 0;
+        continue;
+      }
+      const x = i % size;
+      const y = (i - x) / size;
+      s.lightSeen[i] = Math.abs(x - px) <= FIXED_SIGHT && Math.abs(y - py) <= FIXED_SIGHT && clearLine(floor, px, py, x, y) ? v : 0;
+    }
+  }
+  for (let i = 0; i < s.light.length; i++) {
+    const v = Math.max(s.lightHand[i], s.lightSeen[i]);
+    s.light[i] = v;
+    if (v > 0) s.seenAt[i] = s.trail;
+  }
+}
+
+function pickUp(s: GameState) {
+  const item = s.items.get(s.pos);
+  if (!item) return;
+  if (item.kind === 'oilJar') {
+    const spec = CARRY[s.hand.kind];
+    if (s.hand.left <= spec.seconds - OIL_MIN_GAIN) {
+      s.hand.left = spec.seconds;
+      s.ember = 0;
+      s.lowWarned = false;
+      s.items.delete(s.pos);
+      emit(s, 'refill', s.hand.kind);
+      return;
+    }
+    let best = -1;
+    let deficit = OIL_MIN_GAIN - 1e-9;
+    s.bag.forEach((b, i) => {
+      const d = CARRY[b.kind].seconds - b.left;
+      if (d > deficit) {
+        deficit = d;
+        best = i;
+      }
+    });
+    if (best >= 0) {
+      s.bag[best].left = CARRY[s.bag[best].kind].seconds;
+      s.items.delete(s.pos);
+      emit(s, 'refill', s.bag[best].kind);
+    }
+    return;
+  }
+  const carried: Carried = { kind: item.kind as Carried['kind'], left: item.left };
+  if (s.hand.left <= 0) {
+    setHand(s, carried);
+    s.items.delete(s.pos);
+    emit(s, 'pickup', carried.kind);
+  } else if (s.bag.length < BAG_SIZE) {
+    s.bag.push(carried);
+    s.items.delete(s.pos);
+    emit(s, 'pickup', carried.kind);
+  } else {
+    emit(s, 'bagFull', carried.kind);
+  }
+}
+
+function lightFixtures(s: GameState) {
+  if (s.hand.left <= 0) return;
+  const { size } = s.floor;
+  const px = s.pos % size;
+  const py = (s.pos - px) / size;
+  s.floor.fixtures.forEach((f, i) => {
+    if (s.fixtureLeft[i] !== -1) return;
+    const dx = Math.abs((f.tile % size) - px);
+    const dy = Math.abs(Math.floor(f.tile / size) - py);
+    // sconces need you on or orthogonally next to their tile; the rest within one tile
+    const near = f.kind === 'sconce' ? dx + dy <= 1 : dx <= 1 && dy <= 1;
+    if (!near) return;
+    s.fixtureLeft[i] = FIXTURE[f.kind].seconds;
+    s.fixedDirty = true;
+    emit(s, 'lit', f.kind);
+  });
+}
+
+function burn(s: GameState, dt: number) {
+  const h = s.hand;
+  if (h.left > 0) {
+    h.left -= dt;
+    if (h.left <= 0) {
+      h.left = 0;
+      let best = -1;
+      s.bag.forEach((b, i) => {
+        if (best < 0 || b.left > s.bag[best].left) best = i;
+      });
+      if (best >= 0) {
+        const next = s.bag.splice(best, 1)[0];
+        setHand(s, next);
+        emit(s, 'autoLight', next.kind);
+      }
+    } else if (h.left <= LOW_SECONDS && !s.lowWarned && !s.bag.length) {
+      s.lowWarned = true;
+      emit(s, 'lowLight', h.kind);
+    }
+  } else {
+    s.ember += dt;
+    if (s.ember > EMBER.seconds) s.status = 'burntOut';
+  }
+  s.floor.fixtures.forEach((f, i) => {
+    const left = s.fixtureLeft[i];
+    if (left <= 0 || left === Infinity) return;
+    const nl = Math.max(0, left - dt);
+    s.fixtureLeft[i] = nl;
+    if (nl === 0 || radiusQ(fixtureRadius(f.kind, nl)) !== s.fixtureR[i]) s.fixedDirty = true;
+  });
 }
 
 /** Applies one action. Mutates and returns the state, or returns a new state on a floor change. */
 export function step(s: GameState, action: Action): GameState {
   switch (action.type) {
     case 'move': {
-      if (s.status !== 'playing') return s;
+      if (s.status !== 'playing' || s.cooldown > 0) return s;
       const { size, solid } = s.floor;
       const [dx, dy] = DIRS[action.dir];
       const x = (s.pos % size) + dx;
       const y = Math.floor(s.pos / size) + dy;
       const next = y * size + x;
       if (x < 0 || y < 0 || x >= size || y >= size || solid[next]) return s;
+      // carry the unused part of the last tick over: an exact cadence at any frame rate
+      s.cooldown = (s.cooldown > -STEP_SECONDS ? s.cooldown : 0) + STEP_SECONDS;
       s.pos = next;
       s.steps++;
       s.burning = true;
-      s.walked[next] = 1;
-      if (s.oil.delete(next)) {
-        s.fuel = 1;
-        s.ember = 0;
-      }
+      s.trail++;
+      s.walkedAt[next] = s.trail;
+      pickUp(s);
+      lightFixtures(s);
       if (next === s.floor.stairs) {
         s.status = isBasement(s.pyramid, s.floorIndex) ? 'escaped' : 'descending';
       }
-      relight(s);
+      relight(s, true);
       return s;
     }
     case 'tick': {
-      if (s.status !== 'playing' || !s.burning) return s;
-      if (s.fuel > 0) {
-        s.fuel = Math.max(0, s.fuel - action.seconds / TORCH_SECONDS);
-      } else {
-        s.ember += action.seconds;
-        if (s.ember > EMBER_SECONDS) s.status = 'burntOut';
-      }
-      relight(s);
+      if (s.status !== 'playing') return s;
+      s.cooldown = Math.max(-STEP_SECONDS, s.cooldown - action.seconds);
+      if (!s.burning) return s;
+      burn(s, action.seconds);
+      relight(s, false);
+      return s;
+    }
+    case 'swap': {
+      if (s.status !== 'playing' || action.slot < 0 || action.slot >= s.bag.length) return s;
+      const spare = s.bag[action.slot];
+      if (s.hand.left > 0) s.bag[action.slot] = s.hand;
+      else s.bag.splice(action.slot, 1);
+      setHand(s, spare);
+      emit(s, 'swap', spare.kind);
+      relight(s, false);
       return s;
     }
     case 'continue': {
       if (s.status !== 'descending') return s;
       const next = s.floorIndex + 1;
-      return startFloor(s.pyramid, next, isCampFloor(s.pyramid, next) ? 1 : s.fuel, s.steps);
+      let hand = s.hand;
+      if (isCampFloor(s.pyramid, next)) {
+        // a camp relights the better of your source and a plain torch, full
+        const kind = CARRY[hand.kind].seconds >= CARRY.torch.seconds ? hand.kind : 'torch';
+        hand = { kind, left: CARRY[kind].seconds };
+      }
+      return startFloor(s.pyramid, next, hand, s.bag, s.steps, hand.left > 0 ? 0 : s.ember);
     }
     case 'retry': {
       if (s.status !== 'burntOut') return s;
-      return startFloor(s.pyramid, lastCamp(s.pyramid, s.floorIndex), 1, s.steps);
+      return startFloor(s.pyramid, lastCamp(s.pyramid, s.floorIndex), startHand(), [], s.steps);
     }
   }
 }

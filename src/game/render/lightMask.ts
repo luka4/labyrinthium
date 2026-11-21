@@ -1,40 +1,70 @@
 import { AlphaType, ColorType, Skia, type SkImage } from '@shopify/react-native-skia';
 
 import type { GameState } from '../core/game';
-
-/** Brightness of tiles you have seen (and walked) but that the torch does not reach now. */
-export const MEMORY_SEEN = 0.13;
-export const MEMORY_WALKED = 0.3;
+import { MEMORY_SEEN, MEMORY_WALKED, memoryLevel } from '../core/memory';
 
 /**
  * Per-frame light as a small image: 2x2 pixels per tile, alpha = brightness. The baked
  * floor is multiplied by it (DstIn) with linear filtering, which gives soft light edges.
  * Wall tiles take, per half tile, the light of the open tile they face, so a wall is lit
  * from the player's side only and nothing behind it is revealed (walls are 1+ tiles thick).
+ *
+ * Brightness per tile = max(hand light x flicker, visible fixed lights, memory). Memory fades
+ * by the continuous age (moves + step progress), and the whole value cross-fades from the
+ * previous step's, so light slides with the player instead of jumping a tile.
  */
 export type LightMask = {
   /** pixels per side */
   px: number;
-  /** a fresh image of the current light; older ones are disposed a few frames later */
-  render: (s: GameState, flicker: number) => SkImage | null;
+  /**
+   * A fresh image of the current light; older ones are disposed a few frames later.
+   * `t` = step progress 0..1; flickers multiply the hand light and the fixed lights.
+   */
+  render: (s: GameState, t: number, handFlicker: number, fixedFlicker: number) => SkImage | null;
   dispose: () => void;
 };
+
+const ease = (t: number) => t * t * (3 - 2 * t);
 
 export function createLightMask(size: number): LightMask {
   const px = size * 2;
   const data = new Uint8Array(px * px * 4);
-  const value = new Float32Array(size * size);
+  const cur = new Float32Array(size * size);
+  const prev = new Float32Array(size * size);
+  const shown = new Float32Array(size * size);
   const ring: SkImage[] = [];
   const info = { width: px, height: px, alphaType: AlphaType.Premul, colorType: ColorType.RGBA_8888 };
+  let lastTrail = -1;
+  let lastFloor: unknown = null;
 
-  const render = (s: GameState, flicker: number): SkImage | null => {
+  const render = (s: GameState, t: number, handF: number, fixedF: number): SkImage | null => {
     const { opaque } = s.floor;
-    for (let i = 0; i < value.length; i++) {
-      if (opaque[i]) continue;
-      const memory = s.seen[i] ? (s.walked[i] ? MEMORY_WALKED : MEMORY_SEEN) : 0;
-      value[i] = Math.max(s.light[i] * flicker, memory);
+    if (lastFloor !== s.floor) {
+      lastFloor = s.floor;
+      lastTrail = s.trail;
+      prev.fill(0);
+      shown.fill(0);
+    } else if (s.trail !== lastTrail) {
+      // a step was taken: the next frames fade from what is on screen now
+      prev.set(shown);
+      lastTrail = s.trail;
     }
-    const open = (x: number, y: number) => (x < 0 || y < 0 || x >= size || y >= size || opaque[y * size + x] ? 0 : value[y * size + x]);
+    const k = ease(Math.min(1, Math.max(0, t)));
+    // age of a stamp in moves, continuous while the step plays out
+    const clock = s.trail - 1 + Math.min(1, Math.max(0, t));
+    for (let i = 0; i < cur.length; i++) {
+      if (opaque[i]) continue;
+      let v = Math.max(s.lightHand[i] * handF, s.lightSeen[i] * fixedF);
+      const seen = s.seenAt[i];
+      if (seen >= 0 && v < MEMORY_WALKED) {
+        const walked = s.walkedAt[i];
+        const m = Math.max(memoryLevel(clock - seen) * MEMORY_SEEN, walked >= 0 ? memoryLevel(clock - walked) * MEMORY_WALKED : 0);
+        if (m > v) v = m;
+      }
+      cur[i] = v;
+      shown[i] = prev[i] + (v - prev[i]) * k;
+    }
+    const open = (x: number, y: number) => (x < 0 || y < 0 || x >= size || y >= size || opaque[y * size + x] ? 0 : shown[y * size + x]);
     for (let y = 0; y < size; y++)
       for (let x = 0; x < size; x++) {
         const i = y * size + x;
@@ -51,7 +81,7 @@ export function createLightMask(size: number): LightMask {
           b = Math.max(n, e);
           c = Math.max(so, w);
           d = Math.max(so, e);
-        } else a = b = c = d = value[i];
+        } else a = b = c = d = shown[i];
         put(data, (2 * y * px + 2 * x) * 4, a);
         put(data, (2 * y * px + 2 * x + 1) * 4, b);
         put(data, ((2 * y + 1) * px + 2 * x) * 4, c);

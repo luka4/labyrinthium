@@ -1,4 +1,3 @@
-import { Canvas, Picture, createPicture } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -14,9 +13,10 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { TORCH_SECONDS, isCampFloor, lastCamp, startFloor, step, type Direction, type GameState } from '../game/core/game';
+import { isCampFloor, lastCamp, startFloor, step, type Direction, type GameEvent, type GameState } from '../game/core/game';
+import { KIND_NAME, STEP_SECONDS } from '../game/core/lights';
 import type { PyramidInfo } from '../game/core/pyramids';
-import { drawGame } from '../game/render/drawGame';
+import { STRIP_H } from '../game/render/drawLightHud';
 import { bakeFloor, bakeTilePx } from '../game/render/floorArt';
 import { createLightMask } from '../game/render/lightMask';
 import { themeFor } from '../game/render/themes';
@@ -26,18 +26,28 @@ import { Button, IconButton } from '../ui/Button';
 import { haptic } from '../ui/haptics';
 import { Panel, PanelActions, PanelText } from '../ui/Panel';
 import { colors, fonts, space } from '../ui/theme';
+import { Board, STRIP_GAP } from './play/Board';
 import { FloorOverview, type OverviewKind } from './play/FloorOverview';
+import { LightHud, type HudText } from './play/LightHud';
+import { useKeyboard } from './play/useKeyboard';
+import { createWalker } from './play/walker';
 
-/** Redraws per second while nothing moves (torch burn and flicker). */
-const IDLE_FPS = 20;
+/** Redraws per second while the player stands still (flames and the clock still move). */
+const IDLE_FPS = 30;
 /** Tiles across the board; the camera follows the player on larger floors. */
 const VIEW_TILES = 15;
-const SWIPE_MIN_PX = 18;
+/** The finger must move this far (dp) before a swipe counts, and the anchor trails at most this far behind. */
+const SWIPE_START = 14;
+const SWIPE_TRAIL = 36;
+/** A flick: speed in dp per ms over the last 60 ms and total travel in dp. */
+const FLICK_SPEED = 0.9;
+const FLICK_TRAVEL = 48;
+const CAPTION_SECONDS = 1.6;
 
 const DIR: Record<'right' | 'left' | 'down' | 'up', Direction> = { right: 0, left: 1, down: 2, up: 3 };
 
 /**
- * UI phases on top of the core status. The torch only burns in `playing`;
+ * UI phases on top of the core status. The light only burns in `playing`;
  * every overlay freezes the game clock.
  */
 type Phase =
@@ -49,6 +59,44 @@ type Phase =
 
 const campLabel = (floorIndex: number) => (floorIndex === 0 ? 'the top' : `camp · floor ${floorIndex + 1}`);
 
+const mmss = (sec: number) => {
+  const n = Math.max(0, Math.ceil(sec));
+  return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
+};
+
+function captionFor(e: GameEvent): string | null {
+  const name = KIND_NAME[e.kind as keyof typeof KIND_NAME];
+  switch (e.type) {
+    case 'pickup':
+      return `+ ${name}`;
+    case 'refill':
+      return 'Oil refilled';
+    case 'lit':
+      return e.kind === 'sconce' ? 'Sconce lit' : e.kind === 'brazier' ? 'Brazier lit' : 'Candles lit';
+    case 'bagFull':
+      return 'Bag full';
+    case 'autoLight':
+      return `Spare lit: ${name}`;
+    case 'lowLight':
+      return 'Light running low';
+    default:
+      return null;
+  }
+}
+
+function hudOf(g: GameState, caption: HudText['caption']): HudText {
+  const burning = g.hand.left > 0;
+  return {
+    name: burning ? KIND_NAME[g.hand.kind] : 'Embers',
+    time: burning ? mmss(g.hand.left) : `${Math.max(0, Math.ceil(6 - g.ember))} s`,
+    low: !burning || g.hand.left < 10,
+    spares: g.bag.map((b) => ({ label: `${KIND_NAME[b.kind]}, ${Math.ceil(b.left)} seconds` })),
+    caption,
+  };
+}
+
+const hudKey = (h: HudText) => `${h.name}|${h.time}|${h.low}|${h.spares.map((s) => s.label).join(',')}|${h.caption?.id ?? ''}`;
+
 export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromFloor: number }) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -58,10 +106,10 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const { reachFloor, reachCamp, takeArtifact } = useProgress.getState();
 
   const padSpace = controls === 'swipe' ? 0 : 150;
-  const boardSize = Math.max(200, Math.min(width - 32, 560, height - insets.top - insets.bottom - 120 - padSpace));
+  const boardSize = Math.max(200, Math.min(width - 32, 560, height - insets.top - insets.bottom - 90 - STRIP_H - STRIP_GAP - padSpace));
 
-  const game = useRef<GameState>(startFloor(pyramid, fromFloor, 1));
-  const [frame, setFrame] = useState(0);
+  const game = useRef<GameState>(startFloor(pyramid, fromFloor));
+  const [version, setVersion] = useState(0);
   const [phase, setPhase] = useState<Phase>({
     name: 'overview',
     from: fromFloor,
@@ -70,29 +118,71 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   });
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
-  const flicker = useRef(1);
   const cam = useRef({ x: 0, y: 0, floor: null as unknown });
-  const touchStart = useRef<{ x: number; y: number } | null>(null);
   const leaving = useRef(false);
+  const walker = useMemo(() => createWalker(() => haptic.bump()), []);
+  const drawRef = useRef<((time: number) => void) | null>(null);
+  const clock = useRef(0);
+  const caption = useRef<{ id: number; text: string; until: number } | null>(null);
+  const [hud, setHud] = useState<HudText>(() => hudOf(game.current, null));
+  const hudShown = useRef('');
+  const hudDirty = useRef(true);
 
   useEffect(() => {
     reachFloor(pyramid.id, fromFloor);
   }, [pyramid.id, fromFloor, reachFloor]);
 
-  // game clock: the torch burns by time, not by steps, and only while playing
+  // game clock: the light burns by time, not by steps, and only while playing
   useEffect(() => {
     let raf = 0;
     let last: number | null = null;
     let sinceDraw = 0;
+    let sinceHud = 0;
+    let seenFloor: unknown = null;
+    let seenStatus = 'playing';
+    let lastSeq = 0;
     const loop = (t: number) => {
       const dt = last === null ? 0 : Math.min(0.1, (t - last) / 1000);
       last = t;
       if (phaseRef.current.name === 'playing') {
-        game.current = step(game.current, { type: 'tick', seconds: dt });
-        flicker.current = 0.92 + 0.08 * Math.sin(t / 90) + 0.04 * Math.sin(t / 37);
-        sinceDraw += dt;
-        // the camera eases towards the player; redraw every frame while it moves
-        const g = game.current;
+        clock.current += dt;
+        let g = step(game.current, { type: 'tick', seconds: dt });
+        g = walker.update(g);
+        game.current = g;
+        if (seenFloor !== g.floor) {
+          seenFloor = g.floor;
+          lastSeq = 0;
+        }
+        // what happened: haptics and a short caption
+        for (const e of g.events) {
+          if (e.seq <= lastSeq) continue;
+          if (e.type === 'lowLight') haptic.warning();
+          else if (e.type === 'lit' || e.type === 'autoLight') haptic.bump();
+          else if (e.type === 'pickup' || e.type === 'refill') haptic.tap();
+          const text = captionFor(e);
+          if (text) caption.current = { id: e.seq + g.floorIndex * 1000, text, until: clock.current + CAPTION_SECONDS };
+          hudDirty.current = true;
+        }
+        lastSeq = g.eventSeq;
+        if (g.status !== seenStatus) {
+          seenStatus = g.status;
+          walker.reset();
+          setVersion((v) => v + 1);
+        }
+        // the strip text: at most 4 times a second, or at once after an event
+        sinceHud += dt;
+        if (hudDirty.current || sinceHud >= 0.25) {
+          sinceHud = 0;
+          hudDirty.current = false;
+          if (caption.current && clock.current > caption.current.until) caption.current = null;
+          const next = hudOf(g, caption.current ? { id: caption.current.id, text: caption.current.text } : null);
+          const key = hudKey(next);
+          if (key !== hudShown.current) {
+            hudShown.current = key;
+            setHud(next);
+          }
+        }
+        // the camera eases towards the player; redraw every frame while anything moves
         const tx = (g.pos % g.floor.size) + 0.5;
         const ty = Math.floor(g.pos / g.floor.size) + 0.5;
         const view = Math.min(g.floor.size, VIEW_TILES);
@@ -100,19 +190,27 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
         const hi = g.floor.size - view / 2;
         const k = 1 - Math.pow(0.0001, dt);
         const c = cam.current;
-        c.x += (Math.min(hi, Math.max(lo, tx)) - c.x) * k;
-        c.y += (Math.min(hi, Math.max(lo, ty)) - c.y) * k;
-        const moving = Math.abs(c.x - Math.min(hi, Math.max(lo, tx))) > 0.01 || Math.abs(c.y - Math.min(hi, Math.max(lo, ty))) > 0.01;
+        const gx = Math.min(hi, Math.max(lo, tx));
+        const gy = Math.min(hi, Math.max(lo, ty));
+        c.x += (gx - c.x) * k;
+        c.y += (gy - c.y) * k;
+        const moving = Math.abs(c.x - gx) > 0.01 || Math.abs(c.y - gy) > 0.01 || g.cooldown > -STEP_SECONDS || walker.busy();
+        sinceDraw += dt;
         if (moving || sinceDraw >= 1 / IDLE_FPS) {
           sinceDraw = 0;
-          setFrame((f) => f + 1);
+          drawRef.current?.(clock.current);
         }
       }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [walker]);
+
+  // overlays and focus changes stop any walking in progress
+  useEffect(() => {
+    walker.reset();
+  }, [phase.name, walker]);
 
   // react to the core status: stairs, basement, burnt out
   const s = game.current;
@@ -124,8 +222,9 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       game.current = step(game.current, { type: 'continue' });
       reachFloor(pyramid.id, from + 1);
       haptic.bump();
+      hudDirty.current = true;
       setPhase({ name: 'overview', from, to: from + 1, kind: 'descend' });
-      setFrame((f) => f + 1);
+      setVersion((v) => v + 1);
     } else if (status === 'burntOut') {
       haptic.warning();
       setPhase({ name: 'burntOut' });
@@ -140,6 +239,13 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const pause = useCallback(() => {
     if (phaseRef.current.name === 'playing') setPhase({ name: 'paused' });
   }, []);
+  const togglePause = useCallback(() => {
+    const p = phaseRef.current.name;
+    if (p === 'playing') setPhase({ name: 'paused' });
+    else if (p === 'paused') setPhase({ name: 'playing' });
+  }, []);
+
+  useKeyboard(walker, phase.name === 'playing', togglePause);
 
   // the app going to the background pauses the run
   useEffect(() => {
@@ -156,8 +262,11 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
         else if (p === 'paused') setPhase({ name: 'playing' });
         return true;
       });
-      return () => sub.remove();
-    }, []),
+      return () => {
+        sub.remove();
+        walker.reset();
+      };
+    }, [walker]),
   );
 
   const overviewDone = useCallback(() => {
@@ -171,30 +280,76 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     }
   }, [pyramid, reachCamp]);
 
-  const move = (dir: Direction) => {
-    if (phaseRef.current.name !== 'playing') return;
-    const before = game.current.pos;
-    game.current = step(game.current, { type: 'move', dir });
-    if (game.current.pos === before) haptic.bump();
-    setFrame((f) => f + 1);
+  const press = (dir: Direction) => {
+    if (phaseRef.current.name === 'playing') walker.press(dir);
   };
 
-  const onTouchEnd = (e: GestureResponderEvent) => {
-    const start = touchStart.current;
-    touchStart.current = null;
-    if (!start || controls === 'pad') return;
-    const dx = e.nativeEvent.pageX - start.x;
-    const dy = e.nativeEvent.pageY - start.y;
-    if (Math.max(Math.abs(dx), Math.abs(dy)) < SWIPE_MIN_PX) return;
-    if (Math.abs(dx) > Math.abs(dy)) move(dx > 0 ? DIR.right : DIR.left);
-    else move(dy > 0 ? DIR.down : DIR.up);
+  // touch: a swipe moves at once and holding keeps walking; a flick runs on
+  const touch = useRef({ ax: 0, ay: 0, gx: 0, gy: 0, dir: null as Direction | null, samples: [] as Array<{ t: number; x: number; y: number }> });
+  const onGrant = (e: GestureResponderEvent) => {
+    const { pageX, pageY } = e.nativeEvent;
+    const tc = touch.current;
+    tc.ax = tc.gx = pageX;
+    tc.ay = tc.gy = pageY;
+    tc.dir = null;
+    tc.samples = [{ t: e.nativeEvent.timestamp, x: pageX, y: pageY }];
+    walker.cancelRun();
+  };
+  const onMove = (e: GestureResponderEvent) => {
+    const tc = touch.current;
+    const { pageX, pageY, timestamp } = e.nativeEvent;
+    tc.samples.push({ t: timestamp, x: pageX, y: pageY });
+    while (tc.samples.length > 2 && timestamp - tc.samples[0].t > 80) tc.samples.shift();
+    const dx = pageX - tc.ax;
+    const dy = pageY - tc.ay;
+    const dist = Math.hypot(dx, dy);
+    if (dist < SWIPE_START) return;
+    // the dominant axis, with hysteresis so a wobbling finger does not flip axes
+    let horizontal = Math.abs(dx) >= Math.abs(dy);
+    if (tc.dir !== null) {
+      const curH = tc.dir < 2;
+      horizontal = curH ? !(Math.abs(dy) > 1.3 * Math.abs(dx)) : Math.abs(dx) > 1.3 * Math.abs(dy);
+    }
+    const dir: Direction = horizontal ? (dx > 0 ? DIR.right : DIR.left) : dy > 0 ? DIR.down : DIR.up;
+    if (dir !== tc.dir) {
+      tc.dir = dir;
+      press(dir);
+    }
+    if (dist > SWIPE_TRAIL) {
+      tc.ax += (dx / dist) * (dist - SWIPE_TRAIL);
+      tc.ay += (dy / dist) * (dist - SWIPE_TRAIL);
+    }
+  };
+  const onEnd = (e: GestureResponderEvent) => {
+    const tc = touch.current;
+    const first = tc.samples[0];
+    const { pageX, pageY, timestamp } = e.nativeEvent;
+    if (first && tc.dir !== null && useSettings.getState().autoRun) {
+      const span = Math.max(1, timestamp - first.t);
+      const vx = (pageX - first.x) / span;
+      const vy = (pageY - first.y) / span;
+      const travel = Math.hypot(pageX - tc.gx, pageY - tc.gy);
+      if (Math.hypot(vx, vy) >= FLICK_SPEED && travel >= FLICK_TRAVEL) {
+        walker.flick(Math.abs(vx) >= Math.abs(vy) ? (vx > 0 ? DIR.right : DIR.left) : vy > 0 ? DIR.down : DIR.up);
+      }
+    }
+    tc.dir = null;
+    walker.release();
+  };
+
+  const swap = (slot: number) => {
+    if (phaseRef.current.name !== 'playing') return;
+    game.current = step(game.current, { type: 'swap', slot });
+    haptic.tap();
+    hudDirty.current = true;
   };
 
   const retry = () => {
     const from = game.current.floorIndex;
     game.current = step(game.current, { type: 'retry' });
+    hudDirty.current = true;
     setPhase({ name: 'overview', from, to: game.current.floorIndex, kind: 'resume' });
-    setFrame((f) => f + 1);
+    setVersion((v) => v + 1);
   };
 
   const leaveToMap = () => {
@@ -227,15 +382,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       floor: s.floor,
     };
   }
-  const picture = useMemo(
-    () =>
-      createPicture((canvas) => drawGame(canvas, s, art, mask, { camX: cam.current.x, camY: cam.current.y, board: boardSize, tilePx }, flicker.current), {
-        width: boardSize,
-        height: boardSize,
-      }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [frame, s, art, mask, tilePx, boardSize],
-  );
+  void version;
 
   const checkpoint = lastCamp(pyramid, s.floorIndex);
   const floorText = `Floor ${s.floorIndex + 1} of ${pyramid.floorCount}`;
@@ -250,34 +397,33 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
           </Text>
           <Text style={styles.hudText}>{floorText}</Text>
         </View>
-        <Text style={[styles.hudText, styles.hudTorch]} accessibilityLabel={s.fuel > 0 ? `Torch: ${Math.ceil(s.fuel * TORCH_SECONDS)} seconds` : 'Embers'}>
-          {s.fuel > 0 ? `${Math.ceil(s.fuel * TORCH_SECONDS)} s` : 'embers'}
-        </Text>
-      </View>
-      <View style={styles.fuelTrack} accessibilityRole="progressbar" accessibilityValue={{ min: 0, max: 100, now: Math.round(s.fuel * 100) }}>
-        <View style={[styles.fuelBar, { width: `${s.fuel * 100}%` }, s.fuel < 0.25 && styles.fuelLow]} />
+        <View style={styles.hudSpacer} />
       </View>
 
-      <View
-        style={{ width: boardSize, height: boardSize }}
-        onStartShouldSetResponder={() => true}
-        onResponderGrant={(e) => {
-          touchStart.current = { x: e.nativeEvent.pageX, y: e.nativeEvent.pageY };
-        }}
-        onResponderRelease={onTouchEnd}
-        accessibilityLabel="Labyrinth. Swipe to move."
-      >
-        <Canvas style={{ width: boardSize, height: boardSize }}>
-          <Picture picture={picture} />
-        </Canvas>
+      <View style={{ width: boardSize, height: STRIP_H + STRIP_GAP + boardSize }}>
+        <Board game={game} cam={cam} art={art} mask={mask} boardSize={boardSize} tilePx={tilePx} drawRef={drawRef} />
+        <LightHud hud={hud} width={boardSize} onSwap={swap} />
+        <View
+          style={{ position: 'absolute', left: 0, top: STRIP_H + STRIP_GAP, width: boardSize, height: boardSize }}
+          onStartShouldSetResponder={() => controls !== 'pad'}
+          onResponderTerminationRequest={() => false}
+          onResponderGrant={onGrant}
+          onResponderMove={onMove}
+          onResponderRelease={onEnd}
+          onResponderTerminate={() => {
+            touch.current.dir = null;
+            walker.release();
+          }}
+          accessibilityLabel="Labyrinth. Swipe to move, hold to keep walking, flick to run."
+        />
       </View>
 
       {controls !== 'swipe' && (
         <View style={styles.pad}>
-          <PadButton label="↑" a11y="Up" onPress={() => move(DIR.up)} style={styles.padUp} />
-          <PadButton label="←" a11y="Left" onPress={() => move(DIR.left)} style={styles.padLeft} />
-          <PadButton label="↓" a11y="Down" onPress={() => move(DIR.down)} style={styles.padDown} />
-          <PadButton label="→" a11y="Right" onPress={() => move(DIR.right)} style={styles.padRight} />
+          <PadButton label="↑" a11y="Up" dir={DIR.up} press={press} release={walker.release} style={styles.padUp} />
+          <PadButton label="←" a11y="Left" dir={DIR.left} press={press} release={walker.release} style={styles.padLeft} />
+          <PadButton label="↓" a11y="Down" dir={DIR.down} press={press} release={walker.release} style={styles.padDown} />
+          <PadButton label="→" a11y="Right" dir={DIR.right} press={press} release={walker.release} style={styles.padRight} />
         </View>
       )}
 
@@ -297,7 +443,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       {phase.name === 'camp' && (
         <Panel eyebrow={`Camp · ${floorText}`} title="A place to rest">
           <PanelText>
-            Progress is saved and your torch burns full again. If it goes out further down, you come back to this camp.
+            Progress is saved and your light burns full again (a torch, or your better source). If it goes out further down, you come back to this camp.
           </PanelText>
           <PanelActions>
             <Button variant="primary" label="Continue the descent" onPress={() => setPhase({ name: 'playing' })} />
@@ -308,7 +454,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
 
       {phase.name === 'paused' && (
         <Panel eyebrow={`${pyramid.name} · ${floorText}`} title="Paused" onDismiss={() => setPhase({ name: 'playing' })}>
-          <PanelText>The torch does not burn while the game is paused.</PanelText>
+          <PanelText>Your light does not burn while the game is paused.</PanelText>
           <PanelActions>
             <Button variant="primary" label="Resume" onPress={() => setPhase({ name: 'playing' })} />
             <Button label="Settings" onPress={() => router.push('/settings')} />
@@ -324,9 +470,9 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       )}
 
       {phase.name === 'burntOut' && (
-        <Panel eyebrow={floorText} title="The torch is out">
+        <Panel eyebrow={floorText} title="The light is out">
           <PanelText>
-            Darkness. You feel your way back to {campLabel(checkpoint)}, where the torch is relit.
+            Darkness. You feel your way back to {campLabel(checkpoint)}, where a torch is lit again.
           </PanelText>
           <PanelActions>
             <Button variant="primary" label={checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={retry} />
@@ -338,12 +484,27 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   );
 }
 
-function PadButton({ label, a11y, onPress, style }: { label: string; a11y: string; onPress: () => void; style: object }) {
+function PadButton({
+  label,
+  a11y,
+  dir,
+  press,
+  release,
+  style,
+}: {
+  label: string;
+  a11y: string;
+  dir: Direction;
+  press: (d: Direction) => void;
+  release: () => void;
+  style: object;
+}) {
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={a11y}
-      onPress={onPress}
+      onPressIn={() => press(dir)}
+      onPressOut={release}
       style={({ pressed }) => [styles.padButton, style, pressed && styles.padPressed]}
     >
       <Text style={styles.padText}>{label}</Text>
@@ -355,12 +516,9 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg, alignItems: 'center', gap: space.md },
   hud: { width: '100%', paddingHorizontal: space.lg, flexDirection: 'row', alignItems: 'center', gap: space.md },
   hudMiddle: { flex: 1, alignItems: 'center' },
+  hudSpacer: { width: 44 },
   hudTitle: { color: colors.ink, fontFamily: fonts.displayMedium, fontSize: 16 },
   hudText: { color: colors.muted, fontFamily: fonts.bodyMedium, fontSize: 14, fontVariant: ['tabular-nums'] },
-  hudTorch: { width: 56, textAlign: 'right', color: colors.ink },
-  fuelTrack: { width: '90%', height: 8, borderRadius: 4, backgroundColor: '#2a241a', overflow: 'hidden' },
-  fuelBar: { height: '100%', backgroundColor: '#f0b54a' },
-  fuelLow: { backgroundColor: '#d9652b' },
   note: { color: colors.dim, fontFamily: fonts.body, fontSize: 13, textAlign: 'center' },
   pad: { width: 180, height: 124 },
   padButton: {
