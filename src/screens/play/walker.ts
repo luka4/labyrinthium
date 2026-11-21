@@ -50,6 +50,8 @@ export function createWalker(onBump: () => void): Walker {
     return (tile: number) => {
       for (const i of s.items.keys()) if (near(i, tile)) return true;
       for (let k = 0; k < s.floor.fixtures.length; k++) if (s.fixtureLeft[k] === -1 && near(s.floor.fixtures[k].tile, tile)) return true;
+      // a grave good in an opened chamber, not yet taken
+      for (let k = 0; k < s.floor.secrets.length; k++) if (s.secretPhase[k] === 3 && !(s.secretsFound & (1 << k)) && near(s.floor.secrets[k].spot, tile)) return true;
       return false;
     };
   };
@@ -92,9 +94,11 @@ export function createWalker(onBump: () => void): Walker {
       }
       if (dir === null) return s;
       const before = s.pos;
+      const seq = s.eventSeq;
       const next = step(s, { type: 'move', dir });
       if (next.pos === before && next === s) {
-        if (fresh) onBump();
+        // a push on plaster has its own feedback (knock, break): no wall bump on top of it
+        if (fresh && next.eventSeq === seq) onBump();
         // a wall stops hold and run alike
         held = null;
         run = null;

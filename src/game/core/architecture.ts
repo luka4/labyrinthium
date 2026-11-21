@@ -1,5 +1,5 @@
 import type { Lattice, Room, RoomKind, Spot } from './floor';
-import { EGYPT_ROWS, type EgyptRow, type GuardianRow } from './egypt';
+import { EGYPT_FRAGMENT_FLOORS, EGYPT_ROWS, EGYPT_SECRETS, type EgyptRow, type GuardianRow } from './egypt';
 import type { Rng } from './rng';
 
 /**
@@ -34,6 +34,10 @@ export type ArchProfile = {
   collapse?: (floorIndex: number) => EgyptRow['collapse'];
   /** the tomb guardian of a floor (plan 04); absent or null = none */
   guardian?: (floorIndex: number) => GuardianRow | null;
+  /** sealed secret chambers on a floor (secrets.ts); absent = 1 */
+  secrets?: (floorIndex: number) => number;
+  /** the story fragment index held by the first secret of a floor, or -1 */
+  fragment?: (floorIndex: number) => number;
   /** basement: the sand's cap % once the artifact is taken; absent or null = no escape sand */
   escapeCap?: (floorIndex: number) => number | null;
   /** the basement has a false door that opens onto the escape shaft */
@@ -69,6 +73,8 @@ const EGYPT: ArchProfile = {
   collapse: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].collapse,
   guardian: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].guardian,
   escapeCap: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].escapeCap,
+  secrets: EGYPT_SECRETS,
+  fragment: (i) => (EGYPT_FRAGMENT_FLOORS as readonly number[]).indexOf(i),
   falseDoor: true,
   halls: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].halls,
   galleries: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].galleries,
@@ -95,6 +101,8 @@ const PROFILES: Record<ArchProfileId, ArchProfile> = {
     collapse: undefined,
     guardian: undefined,
     escapeCap: undefined,
+    secrets: () => 1,
+    fragment: () => -1,
     falseDoor: false,
   },
   black: {
@@ -111,6 +119,8 @@ const PROFILES: Record<ArchProfileId, ArchProfile> = {
     collapse: undefined,
     guardian: undefined,
     escapeCap: undefined,
+    secrets: () => 1,
+    fragment: () => -1,
     falseDoor: false,
   },
 };

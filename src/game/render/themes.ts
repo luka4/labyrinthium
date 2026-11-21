@@ -34,6 +34,10 @@ export type FloorTheme = {
   granite: string;
   graniteEdge: string;
   /** the guardian (plan 04): resin-dark linen wrappings, their shadow and highlight, and the gilded cartonnage mask */
+  /** smooth gypsum plaster of a sealed doorway, the rough bedrock of a secret chamber, ochre ground of a painted wall (plan 05) */
+  plaster: string;
+  bedrock: string;
+  ochre: string;
   linen: string;
   linenDark: string;
   linenLight: string;
@@ -72,6 +76,9 @@ const EGYPT: FloorTheme = {
   sandDark: '#a88a52',
   granite: '#5f4b48',
   graniteEdge: '#a48c82',
+  plaster: '#d9cdb4',
+  bedrock: '#6b5c43',
+  ochre: '#c98a3c',
   linen: '#6b5a43',
   linenDark: '#3a2c1e',
   linenLight: '#a08a68',
@@ -118,6 +125,9 @@ function derived(base: string): FloorTheme {
     sandDark: scale(base, 0.7),
     granite: scale(base, 0.38),
     graniteEdge: scale(base, 0.8),
+    plaster: scale(base, 1.02),
+    bedrock: scale(base, 0.5),
+    ochre: '#c98a3c',
     linen: '#6b5a43',
     linenDark: '#3a2c1e',
     linenLight: '#a08a68',

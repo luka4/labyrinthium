@@ -13,18 +13,25 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { isCampFloor, lastCamp, startFloor, step, type Direction, type GameEvent, type GameState } from '../game/core/game';
+import { isBasement, isCampFloor, lastCamp, startFloor, step, type Direction, type GameEvent, type GameState } from '../game/core/game';
 import type { TrapKind } from '../game/core/floor';
 import { KIND_NAME, STEP_SECONDS } from '../game/core/lights';
+import { TREASURE_NAME, popcount, secretAtSeal, type TreasureKind } from '../game/core/secrets';
 import type { PyramidInfo } from '../game/core/pyramids';
+import { floorResult, parTime } from '../game/core/stars';
+import { storyOf } from '../game/story';
 import { STRIP_H } from '../game/render/drawLightHud';
 import { createFloorArt, type FloorArt } from '../game/render/floorArt';
 import { createLightMask } from '../game/render/lightMask';
 import { themeFor } from '../game/render/themes';
+import { getAmbience, getEngine } from '../audio';
+import { createSoundDirector } from '../audio/director';
 import { useProgress, type HintId } from '../state/progress';
 import { useReducedMotion, useSettings } from '../state/settings';
 import { Button, IconButton } from '../ui/Button';
-import { haptic } from '../ui/haptics';
+import { createHapticSequencer, fire, haptic } from '../ui/haptics';
+import { clock as mmss2, starLabels, starStates, type OverviewResult } from './play/results';
+import { StarRow } from '../ui/StarRow';
 import { Panel, PanelActions, PanelText } from '../ui/Panel';
 import { colors, fonts, space } from '../ui/theme';
 import { Board, STRIP_GAP } from './play/Board';
@@ -65,7 +72,10 @@ const HINTS: Record<HintId, string> = {
   guardian: 'A guardian in linen and gold. Your light shows you to it; it hears you walk. Slow steps are quiet.',
   guardianWake: 'Stone grinds somewhere. Something is awake.',
   escape: 'A false door has opened somewhere. The Scarab points the way, briefly.',
+  secret: 'This plaster is newer than the stone around it. Push it.',
 };
+
+const noop = (..._args: unknown[]) => {};
 
 const DIR: Record<'right' | 'left' | 'down' | 'up', Direction> = { right: 0, left: 1, down: 2, up: 3 };
 
@@ -74,7 +84,9 @@ const DIR: Record<'right' | 'left' | 'down' | 'up', Direction> = { right: 0, lef
  * every overlay freezes the game clock.
  */
 type Phase =
-  | { name: 'overview'; from: number; to: number; kind: OverviewKind }
+  | { name: 'overview'; from: number; to: number; kind: OverviewKind; result?: OverviewResult }
+  | { name: 'result'; result: OverviewResult; kind: 'descend' | 'fall' | 'escape' }
+  | { name: 'fragment'; floorIndex: number; fragment: number }
   | { name: 'playing' }
   | { name: 'camp' }
   | { name: 'paused' }
@@ -118,6 +130,12 @@ function captionFor(e: GameEvent): string | null {
       return 'Far off, stone grinds open. Air moves.';
     case 'guardianHit':
       return 'The stone falls on the guardian';
+    case 'secretKnock':
+      return 'It sounds hollow.';
+    case 'secretOpen':
+      return 'A hidden chamber';
+    case 'treasure':
+      return `+ ${TREASURE_NAME[e.kind as TreasureKind]}`;
     default:
       return null;
   }
@@ -136,13 +154,18 @@ function hudOf(g: GameState, caption: HudText['caption']): HudText {
 
 const hudKey = (h: HudText) => `${h.name}|${h.time}|${h.low}|${h.spares.map((s) => s.label).join(',')}|${h.caption?.id ?? ''}`;
 
-export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromFloor: number }) {
+export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: PyramidInfo; fromFloor: number; mode?: 'descent' | 'replay' }) {
+  const replay = mode === 'replay';
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const controls = useSettings((s) => s.controls);
   const reducedMotion = useReducedMotion();
   const artifactTaken = useProgress((s) => !!s.artifacts[pyramid.id]);
-  const { reachFloor, reachCamp, takeArtifact } = useProgress.getState();
+  const { reachFloor: reachFloorSaved, reachCamp: reachCampSaved, takeArtifact: takeArtifactSaved } = useProgress.getState();
+  // a replayed floor never touches the descent: no checkpoint, no deepest floor, no artifact
+  const reachFloor = replay ? noop : reachFloorSaved;
+  const reachCamp = replay ? noop : reachCampSaved;
+  const takeArtifact = replay ? noop : takeArtifactSaved;
 
   const padSpace = controls === 'swipe' ? 0 : 150;
   const boardSize = Math.max(200, Math.min(width - 32, 560, height - insets.top - insets.bottom - 90 - STRIP_H - STRIP_GAP - padSpace));
@@ -153,13 +176,18 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     name: 'overview',
     from: fromFloor,
     to: fromFloor,
-    kind: fromFloor === 0 ? 'enter' : 'resume',
+    kind: replay ? 'replay' : fromFloor === 0 ? 'enter' : 'resume',
   });
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
   const cam = useRef({ x: 0, y: 0, floor: null as unknown });
   const leaving = useRef(false);
-  const walker = useMemo(() => createWalker(() => haptic.bump()), []);
+  const walker = useMemo(() => createWalker(() => haptic.play('wall')), []);
+  // sound and haptics (plan 05): one director reads the state and events; its haptic patterns run on the game clock
+  const seq = useMemo(() => createHapticSequencer(fire), []);
+  const director = useMemo(() => createSoundDirector(getEngine(), seq), [seq]);
+  /** the star bits and secrets the save held when this run's floor began (the result compares against them) */
+  const startHeld = useRef({ s: 0, f: 0, t: null as number | null });
   const drawRef = useRef<((time: number) => void) | null>(null);
   const artRef = useRef<FloorArt | null>(null);
   /** the first sightings captioned so far on this floor; the plate hint comes before the kind hint */
@@ -171,6 +199,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const hudDirty = useRef(true);
   /** clock time at which the escape hint is due (3 s after the artifact is taken), or -1 */
   const escapeHintAt = useRef(-1);
+  const fragmentTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     reachFloor(pyramid.id, fromFloor);
@@ -207,6 +236,10 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
         if (hints[id]) continue;
         if (showHint(id, g.floorIndex * 1000 + 500 + k + size)) return;
       }
+      // the plaster of a sealed doorway, lit and in view
+      for (let k = 0; k < g.floor.secrets.length; k++) {
+        if (g.secretPhase[k] === 0 && g.light[g.floor.secrets[k].front] >= 0.3 && showHint('secret', g.floorIndex * 1000 + 800 + k)) return;
+      }
     },
     [showHint],
   );
@@ -218,6 +251,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     let sinceDraw = 0;
     let sinceHud = 0;
     let seenFloor: unknown = null;
+    let seenRun: unknown = null;
     let seenStatus = 'playing';
     let lastSeq = 0;
     const loop = (t: number) => {
@@ -239,15 +273,40 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
           seenFloor = g.floor;
           lastSeq = 0;
         }
-        // what happened: haptics and a short caption
+        if (seenRun !== g) {
+          // a new run: this floor from the top of its stairs (or a retry): the plaster is whole again, the save's numbers are noted
+          seenRun = g;
+          artRef.current?.reset();
+          const rec = useProgress.getState().floors[pyramid.id]?.[g.floorIndex];
+          startHeld.current = { s: rec?.s ?? 0, f: rec?.f ?? 0, t: rec?.t ?? null };
+          useProgress.getState().noteFloor(pyramid.id, g.floorIndex, g.floor.secrets.length);
+          getAmbience().enter(pyramid.id, g.floorIndex, pyramid.floorCount);
+        }
+        // sound and haptic patterns (the same events feed the captions below)
+        director.update(g, dt, true);
+        seq.tick(dt);
+        getAmbience().update(dt, g.floorIndex);
+        // what happened: art, the save and a short caption
         for (const e of g.events) {
           if (e.seq <= lastSeq) continue;
-          // placeholder haptics: task 05 replaces them with sound and patterns
-          if (e.type === 'lowLight' || e.type === 'hit' || e.type === 'guardianTouch' || e.type === 'caught') haptic.warning();
-          else if (e.type === 'lit' || e.type === 'autoLight' || e.type === 'trapFired' || e.type === 'sandNear' || e.type === 'guardianNear') haptic.bump();
-          else if (e.type === 'pickup' || e.type === 'refill' || e.type === 'plate') haptic.tap();
-          else if (e.type === 'quake' || e.type === 'guardianWake' || e.type === 'exitOpened') haptic.heavy();
-          else if (e.type === 'artifactTaken') haptic.success();
+          if (e.type === 'secretBreak') artRef.current?.prepareOpened();
+          else if (e.type === 'secretOpen') {
+            const k = secretAtSeal(g.floor, e.at);
+            if (k >= 0) artRef.current?.open(k);
+          } else if (e.type === 'treasure') {
+            const k = g.floor.secrets.findIndex((x) => x.spot === e.at);
+            if (k >= 0) useProgress.getState().markSecret(pyramid.id, g.floorIndex, k, g.floor.secrets.length);
+          } else if (e.type === 'fragment') {
+            const k = g.floor.secrets.findIndex((x) => x.spot === e.at);
+            const fragment = k >= 0 ? g.floor.secrets[k].fragment : -1;
+            if (fragment >= 0) {
+              const floorIndex = g.floorIndex;
+              // a beat to see the grave good go, then the painted wall
+              fragmentTimer.current = setTimeout(() => {
+                if (phaseRef.current.name === 'playing') setPhase({ name: 'fragment', floorIndex, fragment });
+              }, 400);
+            }
+          }
           if (e.type === 'guardianStep') continue;
           const text = captionFor(e);
           if (text) caption.current = { id: e.seq + g.floorIndex * 1000, text, until: clock.current + CAPTION_SECONDS };
@@ -299,12 +358,25 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [walker, showHint, checkHints]);
+  }, [walker, showHint, checkHints, director, seq, pyramid.id, pyramid.floorCount]);
 
   // overlays and focus changes stop any walking in progress
   useEffect(() => {
     walker.reset();
   }, [phase.name, walker]);
+
+  /** the result of the floor just left: recorded in the save, compared with what it held when the run began */
+  const finishFloor = useCallback(
+    (g: GameState): OverviewResult => {
+      const r = floorResult(g);
+      const held = startHeld.current;
+      useProgress.getState().recordFloor(pyramid.id, r);
+      if (replay && r.cleared && g.escape) useProgress.getState().recordEscape(pyramid.id, g.escape.t);
+      const best = r.cleared ? (held.t === null ? r.time : Math.min(held.t, r.time)) : held.t;
+      return { ...r, best, newBest: r.cleared && held.t !== null && r.time < held.t, heldS: held.s, heldF: held.f, foundMask: g.secretsFound };
+    },
+    [pyramid.id, replay],
+  );
 
   // react to the core status: stairs, basement, burnt out
   const s = game.current;
@@ -312,12 +384,18 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   useEffect(() => {
     if (status === 'descending') {
       if (game.current.status !== 'descending') return; // already handled (effects can run twice)
-      const from = game.current.floorIndex;
-      game.current = step(game.current, { type: 'continue' });
+      const g0 = game.current;
+      const from = g0.floorIndex;
+      const result = finishFloor(g0);
+      if (replay) {
+        setPhase({ name: 'result', result, kind: 'descend' });
+        return;
+      }
+      game.current = step(g0, { type: 'continue' });
       reachFloor(pyramid.id, from + 1);
-      haptic.bump();
+      haptic.play('tap');
       hudDirty.current = true;
-      setPhase({ name: 'overview', from, to: from + 1, kind: 'descend' });
+      setPhase({ name: 'overview', from, to: from + 1, kind: 'descend', result });
       setVersion((v) => v + 1);
     } else if (status === 'falling') {
       // the slab tilts open (0.25 s), then the next floor starts where the shaft lets you out
@@ -325,39 +403,69 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
         const g = game.current;
         if (g.status !== 'falling') return;
         const from = g.floorIndex;
+        const result = finishFloor(g);
+        haptic.play('land');
+        if (replay) {
+          setPhase({ name: 'result', result, kind: 'fall' });
+          return;
+        }
         game.current = step(g, { type: 'continue' });
         reachFloor(pyramid.id, from + 1);
-        haptic.heavy();
         hudDirty.current = true;
-        setPhase({ name: 'overview', from, to: from + 1, kind: 'fall' });
+        setPhase({ name: 'overview', from, to: from + 1, kind: 'fall', result });
         setVersion((v) => v + 1);
       }, reducedMotion ? 0 : FALL_SECONDS * 1000);
       return () => clearTimeout(id);
     } else if (status === 'burntOut') {
-      haptic.warning();
+      haptic.play('touch');
       setPhase({ name: 'burntOut' });
     } else if (status === 'buried') {
-      haptic.warning();
+      haptic.play('block');
       setPhase({ name: 'buried' });
     } else if (status === 'caught') {
-      haptic.warning();
       setPhase({ name: 'caught' });
     } else if (status === 'escaped' && !leaving.current) {
       if (game.current.floor.exit >= 0) {
         // the step into the doorway plays for a moment, then the climb up the shaft
         const id = setTimeout(() => {
           const g = game.current;
-          haptic.success();
-          setPhase({ name: 'overview', from: g.floorIndex, to: g.floorIndex, kind: 'escape' });
+          haptic.play('found');
+          const result = finishFloor(g);
+          if (replay) setPhase({ name: 'result', result, kind: 'escape' });
+          else setPhase({ name: 'overview', from: g.floorIndex, to: g.floorIndex, kind: 'escape', result });
         }, reducedMotion ? 0 : ESCAPE_STEP_SECONDS * 1000);
         return () => clearTimeout(id);
       }
       leaving.current = true;
-      haptic.success();
+      haptic.play('found');
+      finishFloor(game.current);
       takeArtifact(pyramid.id);
-      router.replace({ pathname: '/artifact/[id]', params: { id: pyramid.id } });
+      if (replay) router.back();
+      else router.replace({ pathname: '/artifact/[id]', params: { id: pyramid.id } });
     }
-  }, [status, pyramid.id, reachFloor, takeArtifact, reducedMotion]);
+  }, [status, pyramid.id, reachFloor, takeArtifact, reducedMotion, finishFloor, replay]);
+
+  // overlays fade the world out of the mix; a long stop lets the audio device sleep
+  useEffect(() => {
+    director.setOverlay(phase.name !== 'playing');
+    if (phase.name === 'playing') {
+      void getEngine().resume();
+      return;
+    }
+    seq.clear();
+    const id = setTimeout(() => void getEngine().suspend(), 30000);
+    return () => clearTimeout(id);
+  }, [phase.name, director, seq]);
+
+  // the game's own sound: its group loads under the first overview; leaving stops everything
+  useEffect(() => {
+    void getEngine().load('game');
+    return () => {
+      director.dispose();
+      getAmbience().leave();
+      if (fragmentTimer.current) clearTimeout(fragmentTimer.current);
+    };
+  }, [director]);
 
   const pause = useCallback(() => {
     if (phaseRef.current.name === 'playing') setPhase({ name: 'paused' });
@@ -369,6 +477,11 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   }, []);
 
   useKeyboard(walker, phase.name === 'playing', togglePause);
+
+  // a call or another app taking the audio pauses the run
+  useEffect(() => {
+    getEngine().onInterruption(() => pause());
+  }, [pause]);
 
   // the app going to the background pauses the run
   useEffect(() => {
@@ -404,13 +517,13 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       router.replace({ pathname: '/artifact/[id]', params: { id: pyramid.id, out: String(out) } });
       return;
     }
-    if (p.kind === 'descend' && isCampFloor(pyramid, p.to)) {
+    if (p.kind === 'descend' && isCampFloor(pyramid, p.to) && !replay) {
       reachCamp(pyramid.id, p.to);
       setPhase({ name: 'camp' });
     } else {
       setPhase({ name: 'playing' });
     }
-  }, [pyramid, reachCamp]);
+  }, [pyramid, reachCamp, replay, takeArtifact]);
 
   const press = (dir: Direction) => {
     if (phaseRef.current.name === 'playing') walker.press(dir);
@@ -472,7 +585,6 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const swap = (slot: number) => {
     if (phaseRef.current.name !== 'playing') return;
     game.current = step(game.current, { type: 'swap', slot });
-    haptic.tap();
     hudDirty.current = true;
   };
 
@@ -481,6 +593,14 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     game.current = step(game.current, { type: 'retry' });
     hudDirty.current = true;
     setPhase({ name: 'overview', from, to: game.current.floorIndex, kind: 'resume' });
+    setVersion((v) => v + 1);
+  };
+
+  /** replay: the same floor again with a fresh torch, or the next one */
+  const playFloor = (floorIndex: number) => {
+    game.current = startFloor(pyramid, floorIndex);
+    hudDirty.current = true;
+    setPhase({ name: 'overview', from: floorIndex, to: floorIndex, kind: 'replay' });
     setVersion((v) => v + 1);
   };
 
@@ -519,6 +639,15 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
 
   const checkpoint = lastCamp(pyramid, s.floorIndex);
   const floorText = `Floor ${s.floorIndex + 1} of ${pyramid.floorCount}`;
+  // the pause panel's line: par and the secrets of this floor (found ever, this run included)
+  const savedFound = useProgress.getState().floors[pyramid.id]?.[s.floorIndex]?.f ?? 0;
+  const floorLine =
+    phase.name === 'paused'
+      ? `Floor ${s.floorIndex + 1} · par ${mmss2(parTime(s.floor))} · secrets ${popcount(savedFound | s.secretsFound)} of ${s.floor.secrets.length} found here`
+      : '';
+  const nextReplay = s.floorIndex + 1 <= (useProgress.getState().deepest[pyramid.id] ?? 0) && !isBasement(pyramid, s.floorIndex);
+  const tryAgain = () => playFloor(game.current.floorIndex);
+  const out = replay ? () => router.back() : leaveToMap;
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top + space.sm, paddingBottom: insets.bottom + space.md }]}>
@@ -570,6 +699,7 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
           artifactTaken={artifactTaken}
           reducedMotion={reducedMotion}
           onDone={overviewDone}
+          result={phase.result}
         />
       )}
 
@@ -588,48 +718,83 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       {phase.name === 'paused' && (
         <Panel eyebrow={`${pyramid.name} · ${floorText}`} title="Paused" onDismiss={() => setPhase({ name: 'playing' })}>
           <PanelText>Your light does not burn while the game is paused.</PanelText>
+          <Text style={styles.note}>{floorLine}</Text>
           <PanelActions>
             <Button variant="primary" label="Resume" onPress={() => setPhase({ name: 'playing' })} />
             <Button label="Settings" onPress={() => router.push('/settings')} />
             <Button
               variant="ghost"
-              label="Leave to the map"
-              onPress={leaveToMap}
-              accessibilityHint={`Next time you start from ${campLabel(checkpoint)}`}
+              label={replay ? 'Back' : 'Leave to the map'}
+              onPress={out}
+              accessibilityHint={replay ? undefined : `Next time you start from ${campLabel(checkpoint)}`}
             />
           </PanelActions>
-          <Text style={styles.note}>Leaving now, you start again from {campLabel(checkpoint)}.</Text>
+          {!replay && <Text style={styles.note}>Leaving now, you start again from {campLabel(checkpoint)}.</Text>}
         </Panel>
       )}
 
       {phase.name === 'buried' && (
         <Panel eyebrow={floorText} title="Sealed in by sand">
-          <PanelText>The sand has closed every way down. You dig back to {campLabel(checkpoint)}.</PanelText>
+          <PanelText>{replay ? 'The sand has closed every way down.' : `The sand has closed every way down. You dig back to ${campLabel(checkpoint)}.`}</PanelText>
           <PanelActions>
-            <Button variant="primary" label={checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={retry} />
-            <Button variant="ghost" label="Leave to the map" onPress={leaveToMap} />
+            <Button variant="primary" label={replay ? 'Try again' : checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={replay ? tryAgain : retry} />
+            <Button variant="ghost" label={replay ? 'Back' : 'Leave to the map'} onPress={out} />
           </PanelActions>
         </Panel>
       )}
 
       {phase.name === 'caught' && (
         <Panel eyebrow={floorText} title="Taken in the dark">
-          <PanelText>With your light gone, the guardian found you. You come to at {campLabel(checkpoint)}.</PanelText>
+          <PanelText>{replay ? 'With your light gone, the guardian found you.' : `With your light gone, the guardian found you. You come to at ${campLabel(checkpoint)}.`}</PanelText>
           <PanelActions>
-            <Button variant="primary" label={checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={retry} />
-            <Button variant="ghost" label="Leave to the map" onPress={leaveToMap} />
+            <Button variant="primary" label={replay ? 'Try again' : checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={replay ? tryAgain : retry} />
+            <Button variant="ghost" label={replay ? 'Back' : 'Leave to the map'} onPress={out} />
           </PanelActions>
         </Panel>
       )}
 
       {phase.name === 'burntOut' && (
         <Panel eyebrow={floorText} title="The light is out">
+          <PanelText>{replay ? 'Darkness. You feel your way back to the stairs, where a torch is lit again.' : `Darkness. You feel your way back to ${campLabel(checkpoint)}, where a torch is lit again.`}</PanelText>
+          <PanelActions>
+            <Button variant="primary" label={replay ? 'Try again' : checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={replay ? tryAgain : retry} />
+            <Button variant="ghost" label={replay ? 'Back' : 'Leave to the map'} onPress={out} />
+          </PanelActions>
+        </Panel>
+      )}
+
+      {phase.name === 'result' && (
+        <Panel eyebrow={`Floor ${phase.result.floorIndex + 1}`} title={phase.kind === 'fall' ? 'Through the trapdoor' : phase.result.cleared ? 'Cleared' : 'Out'}>
+          <View style={styles.resultStars}>
+            <StarRow states={starStates(phase.result)} labels={starLabels(phase.result)} />
+          </View>
+          <Text style={styles.resultTimes}>
+            {phase.result.cleared ? mmss2(phase.result.time) : 'Not cleared'} · par {mmss2(phase.result.par)}
+            {phase.result.best !== null ? ` · best ${mmss2(phase.result.best)}` : ''}
+            {phase.result.newBest ? ' · New best' : ''}
+          </Text>
           <PanelText>
-            Darkness. You feel your way back to {campLabel(checkpoint)}, where a torch is lit again.
+            Secrets {popcount(phase.result.heldF | phase.result.foundMask)} of {phase.result.total}
           </PanelText>
           <PanelActions>
-            <Button variant="primary" label={checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={retry} />
-            <Button variant="ghost" label="Leave to the map" onPress={leaveToMap} />
+            <Button variant="primary" label="Play again" onPress={() => playFloor(phase.result.floorIndex)} />
+            {nextReplay && phase.result.floorIndex === game.current.floorIndex && <Button label="Next floor" onPress={() => playFloor(phase.result.floorIndex + 1)} />}
+            <Button variant="ghost" label="Back" onPress={out} />
+          </PanelActions>
+        </Panel>
+      )}
+
+      {phase.name === 'fragment' && (
+        <Panel
+          eyebrow={`A painted wall · Floor ${phase.floorIndex + 1}`}
+          title={storyOf(pyramid.id)[phase.fragment]?.title ?? 'A painted wall'}
+        >
+          <PanelText>{storyOf(pyramid.id)[phase.fragment]?.text ?? ''}</PanelText>
+          <Text style={styles.note}>
+            Story {phase.fragment + 1} of {storyOf(pyramid.id).length}
+          </Text>
+          <PanelActions>
+            <Button variant="primary" label="Continue" onPress={() => setPhase({ name: 'playing' })} />
           </PanelActions>
         </Panel>
       )}
@@ -673,6 +838,8 @@ const styles = StyleSheet.create({
   hudTitle: { color: colors.ink, fontFamily: fonts.displayMedium, fontSize: 16 },
   hudText: { color: colors.muted, fontFamily: fonts.bodyMedium, fontSize: 14, fontVariant: ['tabular-nums'] },
   note: { color: colors.dim, fontFamily: fonts.body, fontSize: 13, textAlign: 'center' },
+  resultStars: { alignItems: 'center', marginVertical: space.sm },
+  resultTimes: { color: colors.ink, fontFamily: fonts.bodySemi, fontSize: 15, textAlign: 'center', fontVariant: ['tabular-nums'] },
   pad: { width: 180, height: 124 },
   padButton: {
     position: 'absolute',

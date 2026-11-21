@@ -3,7 +3,7 @@ import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { PYRAMIDS, isPyramidId } from '../../game/core/pyramids';
 import { drawRelic } from '../../game/render/drawRelic';
-import { sealsFilled, useProgress } from '../../state/progress';
+import { pyramidStars, sealsFilled, useProgress } from '../../state/progress';
 import { useReducedMotion } from '../../state/settings';
 import { ArtCanvas, useTicker } from '../../ui/ArtCanvas';
 import { Button } from '../../ui/Button';
@@ -25,11 +25,13 @@ export default function ArtifactScreen() {
   const time = useTicker(30);
   const artifacts = useProgress((s) => s.artifacts);
   const record = useProgress((s) => (isPyramidId(id) ? s.records[id] : undefined));
+  const floors = useProgress((s) => s.floors);
 
   if (!isPyramidId(id)) return <Redirect href="/map" />;
   const p = PYRAMIDS[id];
   const heart = id === 'black';
   const seals = sealsFilled(artifacts);
+  const stars = pyramidStars(floors, id);
   const reveal = reduced ? 1 : Math.min(1, time / REVEAL_MS);
   const artH = Math.min(height * 0.45, 400);
 
@@ -61,6 +63,11 @@ export default function ArtifactScreen() {
         <Text style={[type.body, styles.center]}>You took it from the dark and found the way out.</Text>
         <Text style={[type.body, styles.center, { color: colors.muted }]}>{p.power}</Text>
         <Text style={[type.caption, styles.center, { color: colors.gold }]}>{line}</Text>
+        {id !== 'black' || stars.stars > 0 ? (
+          <Text style={[type.caption, styles.center, { color: colors.muted }]}>
+            Stars in {p.name}: {stars.stars} of {stars.max}
+          </Text>
+        ) : null}
         {record?.bestEscape != null && (
           <Text style={[type.caption, styles.center, { color: colors.muted }]}>
             Out in {mmss(Number.isFinite(Number(out)) && out ? Number(out) : record.bestEscape)} · best {mmss(record.bestEscape)}

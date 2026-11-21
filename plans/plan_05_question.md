@@ -173,3 +173,51 @@ The plan gates the audio stack on an EAS dev build playing a panned tone on a ph
 - C. Ship only `expo-audio` now.
 
 **Picked: B.** It gets the realistic spatial sound the user wants, keeps the work going, and limits the risk to one device check the user does later (listed in the phase report). C would lose panning, muffling and reverb for good.
+
+## Implementation decisions
+
+Task 05 implementation (Sonnet 5.5, 2026-11-21). Each: options, pick, reason.
+
+**D1. Chamber spacing rule.** Plan text "expanded rect expanded again by 1" (3 rock tiles) vs its own check "two rock tiles apart". Picked the check: the rect expanded by 1 of a new chamber must not overlap the rect expanded by 1 of an earlier one (gap >= 2 rock tiles). Reason: the stated intent, more candidates.
+
+**D2. Seal exit-pocket rule.** Implemented literally on the expanded rect: neither the exit nor any of its 4 neighbours may lie in it. The check script tests the same tiles.
+
+**D3. Fixed seed count.** 52 secrets on Egypt (6x1 + 10x2 + 8x3 + basement 2), not 50 as the plan's sum says. 96 % are off the main path (floors 3-25 and the others); every real floor gets its full count; fuzz seeds 1-100 over 25 floors (4500 floors): all reach the full count, except tiny early floors.
+
+**D4. Tiny early floors in fuzz.** Fuzz seeds with a 13x13 floor 1 (and one floor 4) have no 3x3 block of solid rock beside a floor tile, so no sealed chamber fits. Options: carve against open tiles (visible holes in walls), or accept no third star on those fuzz floors. Picked: accept; the check warns (not fails) for floor index < 6, fails for any later floor. The real floors 1-6 all have their secret.
+
+**D5. Replay hash.** `replay:4` (Egypt floor 5, light-only hash) changed `40b02f73 -> ab3e4b09`: the random walk presses "up" at the plastered doorway, which is now a knock (cooldown 0.3 s). No other existing snapshot key changed (floors, features, `egypt:i:g`, all `replay:*` except 4). `hashState(full)` mixes the secret fields only once a seal is touched, so older hashes stay. New keys `egypt:i:sec` (25).
+
+**D6. Par.** No tuning: the plan's table is reproduced exactly (1:25, 2:35, 5:50, 10:45, 13:70, 18:65, 24:80, basement 75 for 174/175 steps). The informed bot clears every fixed-seed floor in <= 0.8 x par; 747 of 750 fuzz floors (99.6 %). It warns on ten floors where par is lax for the bot (< 0.35 x par): par is for humans, so the table stays.
+
+**D7. Floors replay.** The result panel's "Next floor" shows only when floor + 1 <= deepest and the floor is not the basement; "Play again" restarts the same floor through the overview ("Floor n again, with a fresh torch"). Burnt out, buried and caught panels get "Try again" / "Back" in a replay. The basement replay records the escape time only (`recordEscape`).
+
+**D8. Star states in the UI.** On the overview and the result panel: earned this run = filled gold, held before = gold outline, missing = dim outline (the plan). On the pyramid page every earned star is filled gold (it is a statement of what you hold, not of what changed).
+
+**D9. Overview star timing.** The row animates in the overview with `useTicker` time; the chimes and the haptic are `setTimeout`s at the pop times (they are wall-clock, the overview never pauses).
+
+**D10. Seal hint.** The seal tile is a wall, never lit, so "seal tile lit >= 0.3" can never hold. The hint fires when the tile in front of an unopened seal is lit >= 0.3.
+
+**D11. Draught lean.** The flame leans along x only (towards the seal's side), 6 degrees at 1 tile and less farther; directly below the seal it only flickers more. Unopened seals within 3 tiles with a clear line to the tile in front.
+
+**D12. Carved copy.** The carved recording sets chamber tiles FLOOR with room -1 (so no paving) and the seal tile FLOOR with the front's room, not DOOR: a DOOR tile would draw a jamb and, next to an antechamber, portcullis grooves. The opened region also covers the row of the tile in front (its contact shadow changes). `FloorArt.reset()` (new) closes the chambers again on a retry or a replay of the same floor (the floor object and its art are shared).
+
+**D13. Audio library gate (Q39, option B).** Not verifiable on a device. Done instead: `react-native-audio-api` 1.0.1 pinned with the plugin options of the plan (`expo-doctor` 20/20, `expo prebuild --platform android --no-install` in a scratch copy generates cleanly: no RECORD_AUDIO, no foreground service, no background mode; the React Native CLI autolinks the package), android and web exports bundle all 91 `.m4a`, and the web build was driven in Chromium (Playwright): the engine creates its context, decodes the 91 files, plays the exterior wind, ui sounds, footsteps, the hand flame, beds, and the replay flow works end to end. Playwright's Chromium has no AAC decoder, so the harness serves the same files as WAV; a real browser decodes the AAC. `expo-audio` stays installed as the thin fallback (`engineExpo.ts`) with its plugin set to `recordAudioAndroid: false, enableBackgroundPlayback: false`; the engine is chosen at first use. Remove the fallback, the dependency and the plugin entry once a dev build of audio-api is confirmed on a phone.
+
+**D14. Decode at the context's rate.** audio-api's `AudioBufferSourceNode` reads a buffer at the context rate and does not resample a buffer of another rate (its loop points and read index use the context rate), so "decode beds at 24 kHz" would shift pitch. Everything is decoded at the device rate through `ctx.decodeAudioData`. To stay under the 32 MB cap: flame, pour, draught and air loops are 4-5 s (plan: 7-9 s), beds are mono (the plan said stereo), `bed.egypt.room` 20 s + `bed.egypt.air` 17 s (LCM 340 s = 5.7 min before the pair repeats; plan 30 + 23 s, 11 min), `g.dread` 6 s. In a run decoded audio is 31.4 MB (core 9.9 + game 13.1 + egypt bed 8.4; the 3.7 MB exterior wind is freed); `check:sounds` enforces the cap. If a phone struggles: drop the 4 sand/grit steps to 2 variants and the flame loops to 3 s.
+
+**D15. The sound set.** 91 ids (the plan said about 95; the variants are separate files `<id>.0..n-1`, `VARIANTS` in `src/audio/variants.ts`, generated apart from the manifest so Node tests can import it), 1.24 MB. All recipes are built from the physical kit in `scripts/sound/dsp.ts` and normalised to -3 dBFS; runtime `gain` in the manifest puts them at the plan's levels (peak dBFS at one tile = `level`). The strike excitation is a differentiated half-sine (a real impact has no net push; the first version rang as a dull thud with the DC feed-through) and noise beds are high-passed at 22-28 Hz. **Nobody has listened to any of it** (the implementation agent cannot): see the report. Checks are objective: spectral peaks and centroids per family (steps 100-1000 Hz body, ui 1-3 kHz, bronze bars on their pitches D4/F4/A4/D5/A2, dread 38 Hz, flames 60-1000 Hz), peaks, DC, loop seams, decoded duration, size.
+
+**D16. Loop seam checks.** Plan: seam RMS within +-1.5 dB of the neighbouring 10 ms and no step > 0.05. On crackling or noisy loops those are not meaningful (a 10 ms window of 180 Hz noise holds one cycle; a crackle pop at the seam is a normal step). Implemented: the 50 ms around the seam must not be a level outlier among the loop's own 50 ms windows (fail > 3 dB, warn > 1.5 dB); the seam step (and the step into the pre-loop padding) must not exceed the larger of 0.1 and 1.2 x the largest step 2.5 ms to either side. Measured on the ffmpeg-decoded files.
+
+**D17. Sound-lock hash.** The lock stores the sha1 of the 16-bit quantised samples, not of the float bytes, so last-bit differences between engines cannot flip it; a Node major change could still change `Math.sin` results, so the Node version in `.nvmrc` (24) is part of the lock.
+
+**D18. Spatial details.** A tile in rock (the seal) is placed at the tile in front of it (clear line needs an open target). `gridStamp` (open seals, the door, trap phases, blocked sand tiles) invalidates the distance field. Loops are updated at 15 Hz with change thresholds.
+
+**D19. Haptics.** `src/ui/hapticPatterns.ts` holds the table and the sequencer (pure, testable in Node); `src/ui/haptics.ts` adds the device calls and the self-driven shared sequencer (menus, the overview, wall bumps). A GameScreen run has its own sequencer, ticked with the game clock and cleared on overlays. `sandNear` and `guardianNear` have no haptic of their own (the heartbeat replaces the latter). The walker's wall bump is skipped when the push produced a secret event.
+
+**D20. Settings volumes.** `sfx` and `ambience` map linearly to bus gain (0.35 / 0.65 / 1.0); old values snap to the nearest step in the UI only.
+
+**D21. Exterior bed.** Started from `RootLayout` by pathname (everything except `/play/*` hears the night wind); a run loads `bed:egypt` (other pyramids borrow it with a low-pass until 07-09). Overlays dip ambience 10 dB; panels suspend the context after 30 s.
+
+**D22. node_modules.** `npx expo install` replaced the worktree's `node_modules` symlink with a real directory (the main checkout is untouched). Not committed (gitignored).

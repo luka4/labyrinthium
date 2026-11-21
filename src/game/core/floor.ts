@@ -2,6 +2,7 @@ import type { ArchProfileId } from './architecture';
 import type { Direction, Pyramid } from './game';
 import type { GuardianRow } from './egypt';
 import type { FixtureKind, ItemKind } from './lights';
+import type { Secret } from './secrets';
 
 /**
  * A floor is a square tile grid built from an architectural plan (see generate.ts):
@@ -169,6 +170,8 @@ export type Floor = {
   exitFront: number;
   /** the tomb guardian, or null */
   guardian: GuardianPlan | null;
+  /** sealed chambers (secrets.ts); the chamber tiles stay ROCK here and open only in a run's grid */
+  secrets: Secret[];
 };
 
 /**
@@ -176,7 +179,7 @@ export type Floor = {
  * Floor i+1's arrival needs floor i's stairs and trapdoors on floor i need floor i+1's layout, so
  * layouts are generated first (generate.ts `layoutFor`) and features are added per floor played.
  */
-export type Layout = Omit<Floor, 'items' | 'fixtures' | 'traps' | 'trapAt' | 'eligiblePorts' | 'collapse' | 'exit' | 'exitFront' | 'guardian'> & {
+export type Layout = Omit<Floor, 'items' | 'fixtures' | 'traps' | 'trapAt' | 'eligiblePorts' | 'collapse' | 'exit' | 'exitFront' | 'guardian' | 'secrets'> & {
   braziers: Fixture[];
   arrivalRoom: number;
   stairsRoom: number;

@@ -8,8 +8,12 @@ export type MotionSetting = 'system' | 'reduced' | 'full';
 
 type SettingsData = {
   haptics: boolean;
-  /** stored now, used once the game has sound */
+  /** mute switch for all sound */
   sound: boolean;
+  /** effects volume 0..1 (world, guardian and interface buses) */
+  sfx: number;
+  /** ambience volume 0..1 */
+  ambience: number;
   controls: Controls;
   /** a flick runs on to the next junction */
   autoRun: boolean;
@@ -25,6 +29,8 @@ export const useSettings = create<SettingsData & SettingsActions>()(
     (set) => ({
       haptics: true,
       sound: true,
+      sfx: 0.8,
+      ambience: 0.7,
       controls: 'both',
       autoRun: true,
       motion: 'system',
@@ -32,9 +38,11 @@ export const useSettings = create<SettingsData & SettingsActions>()(
     }),
     {
       name: 'labyrinthium.settings',
-      version: 1,
+      version: 2,
+      /** v2: volume settings (sfx, ambience) */
+      migrate: (persisted) => ({ sfx: 0.8, ambience: 0.7, ...(persisted as object) }) as SettingsData & SettingsActions,
       storage: createJSONStorage(() => AsyncStorage),
-      partialize: ({ haptics, sound, controls, autoRun, motion }) => ({ haptics, sound, controls, autoRun, motion }),
+      partialize: ({ haptics, sound, sfx, ambience, controls, autoRun, motion }) => ({ haptics, sound, sfx, ambience, controls, autoRun, motion }),
     },
   ),
 );

@@ -2,42 +2,16 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
-import { lastCamp } from '../game/core/game';
-import { PYRAMIDS, SEALS, isPyramidId, type PyramidId } from '../game/core/pyramids';
+import { PYRAMIDS, SEALS, type PyramidId } from '../game/core/pyramids';
+import { STAR, starCount, type FloorResult } from '../game/core/stars';
+import { EMPTY, PROGRESS_VERSION, migrateProgress, type FloorRecord, type HintId, type ProgressData } from './migrateProgress';
+
+export type { EscapeRecord, FloorRecord, HintId, ProgressData } from './migrateProgress';
 
 /**
  * Saved progress through the world. A descent between camps is never saved:
  * leaving or losing the torch resumes from the last camp, as in the design doc.
  */
-/** One-time teaching captions (plan 03): shown the first time a trap kind is lit. */
-export type HintId = 'plate' | 'block' | 'portcullis' | 'sandfall' | 'trapdoor' | 'collapse' | 'guardian' | 'guardianWake' | 'escape';
-
-/** What one pyramid's escapes add up to (plan 04): the count, the fastest, and how many were clean. Task 05 builds stars on it. */
-export type EscapeRecord = {
-  escapes: number;
-  /** seconds from lifting the artifact to the door, best run; null if never recorded */
-  bestEscape: number | null;
-  /** escapes in which the guardian never touched you */
-  untouched: number;
-};
-
-type ProgressData = {
-  /** artifacts taken */
-  artifacts: Partial<Record<PyramidId, true>>;
-  /** checkpoint of the current descent (floor index of the last camp reached) */
-  camp: Partial<Record<PyramidId, number>>;
-  /** deepest floor index ever reached */
-  deepest: Partial<Record<PyramidId, number>>;
-  /** times the basement was reached */
-  completions: Partial<Record<PyramidId, number>>;
-  /** the Black Pyramid's door-opening animation has been shown */
-  blackUnlockSeen: boolean;
-  endingSeen: boolean;
-  /** captions already shown */
-  hints: Partial<Record<HintId, true>>;
-  /** escapes per pyramid (plan 04) */
-  records: Partial<Record<PyramidId, EscapeRecord>>;
-};
 
 type ProgressActions = {
   /** a new descent from the top floor; keeps artifacts */
@@ -48,6 +22,14 @@ type ProgressActions = {
   devReachCamp: (id: PyramidId, floorIndex: number) => void;
   /** the artifact was taken and you got out; `result` = seconds from the artifact to the door and guardian touches */
   takeArtifact: (id: PyramidId, result?: { escape: number; touches: number }) => void;
+  /** replay of the basement: best escape time only, no side effects */
+  recordEscape: (id: PyramidId, seconds: number) => void;
+  /** a floor is being played: remember how many secrets it holds (the third star needs it) */
+  noteFloor: (id: PyramidId, floorIndex: number, secrets: number) => void;
+  /** the grave good of secret k was taken */
+  markSecret: (id: PyramidId, floorIndex: number, k: number, secrets: number) => void;
+  /** a floor was left: ORs the star bits, keeps the best time and the secrets found */
+  recordFloor: (id: PyramidId, r: FloorResult) => void;
   markBlackUnlockSeen: () => void;
   markEndingSeen: () => void;
   markHint: (id: HintId) => void;
@@ -56,16 +38,12 @@ type ProgressActions = {
   devGrantArtifacts: (n: number) => void;
 };
 
-const EMPTY: ProgressData = {
-  artifacts: {},
-  camp: {},
-  deepest: {},
-  completions: {},
-  blackUnlockSeen: false,
-  endingSeen: false,
-  hints: {},
-  records: {},
-};
+const blank = (): FloorRecord => ({ s: 0, t: null, f: 0, n: 0 });
+
+function withFloor(s: ProgressData, id: PyramidId, i: number, patch: (r: FloorRecord) => FloorRecord): Pick<ProgressData, 'floors'> {
+  const mine = s.floors[id] ?? {};
+  return { floors: { ...s.floors, [id]: { ...mine, [i]: patch(mine[i] ?? blank()) } } };
+}
 
 export const useProgress = create<ProgressData & ProgressActions>()(
   persist(
@@ -102,6 +80,30 @@ export const useProgress = create<ProgressData & ProgressActions>()(
             records,
           };
         }),
+      recordEscape: (id, seconds) =>
+        set((s) => {
+          const prev = s.records[id];
+          if (!prev || (prev.bestEscape != null && prev.bestEscape <= seconds)) return s;
+          return { records: { ...s.records, [id]: { ...prev, bestEscape: seconds } } };
+        }),
+      noteFloor: (id, floorIndex, secrets) =>
+        set((s) => ((s.floors[id]?.[floorIndex]?.n ?? 0) === secrets ? s : withFloor(s, id, floorIndex, (r) => ({ ...r, n: secrets })))),
+      markSecret: (id, floorIndex, k, secrets) =>
+        set((s) => {
+          const rec = s.floors[id]?.[floorIndex];
+          if (rec && rec.f & (1 << k) && rec.n === secrets) return s;
+          return withFloor(s, id, floorIndex, (r) => ({ ...r, f: r.f | (1 << k), n: secrets }));
+        }),
+      recordFloor: (id, r) =>
+        set((s) =>
+          withFloor(s, id, r.floorIndex, (rec) => ({
+            s: rec.s | (r.cleared ? STAR.CLEARED : 0) | (r.fast ? STAR.FAST : 0),
+            // the best time counts cleared runs only (a trapdoor fall is not a clear)
+            t: r.cleared ? (rec.t == null ? r.time : Math.min(rec.t, r.time)) : rec.t,
+            f: rec.f,
+            n: r.total,
+          })),
+        ),
       markBlackUnlockSeen: () => set({ blackUnlockSeen: true }),
       markEndingSeen: () => set({ endingSeen: true }),
       markHint: (id) => set((s) => (s.hints[id] ? s : { hints: { ...s.hints, [id]: true } })),
@@ -115,46 +117,10 @@ export const useProgress = create<ProgressData & ProgressActions>()(
     }),
     {
       name: 'labyrinthium.progress',
-      version: 4,
-      /**
-       * v2: Egypt has 10 floors and camps follow the floor number (every 5th), so saved camp
-       * indices no longer match: camps reset (artifacts and records stay), `deepest` is clamped.
-       */
-      migrate: (persisted, version) => {
-        const data = (persisted ?? {}) as Partial<ProgressData>;
-        if (version < 2) {
-          data.camp = {};
-          const deepest: ProgressData['deepest'] = {};
-          for (const [id, floor] of Object.entries(data.deepest ?? {})) {
-            if (isPyramidId(id) && typeof floor === 'number') deepest[id] = Math.min(floor, PYRAMIDS[id].floorCount - 1);
-          }
-          data.deepest = deepest;
-        }
-        if (version < 3) {
-          // v3: Egypt has 25 floors and its own camp list; keep a camp that is still valid, else fall back to the last one
-          const camp: ProgressData['camp'] = {};
-          for (const [id, floor] of Object.entries(data.camp ?? {})) {
-            if (!isPyramidId(id) || typeof floor !== 'number') continue;
-            const p = PYRAMIDS[id];
-            const f = Math.max(0, Math.min(floor, p.floorCount - 1));
-            camp[id] = f === 0 || p.camps.includes(f) ? f : lastCamp(p, f);
-          }
-          data.camp = camp;
-          const deepest: ProgressData['deepest'] = {};
-          for (const [id, floor] of Object.entries(data.deepest ?? {})) {
-            if (isPyramidId(id) && typeof floor === 'number') deepest[id] = Math.min(floor, PYRAMIDS[id].floorCount - 1);
-          }
-          data.deepest = deepest;
-          data.hints = {};
-        }
-        if (version < 4) {
-          // v4: escape records per pyramid
-          data.records = {};
-        }
-        return { ...EMPTY, ...data };
-      },
+      version: PROGRESS_VERSION,
+      migrate: (persisted, version) => migrateProgress(persisted, version),
       storage: createJSONStorage(() => AsyncStorage),
-      partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen, hints, records }) => ({
+      partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen, hints, records, floors }) => ({
         artifacts,
         camp,
         deepest,
@@ -163,6 +129,7 @@ export const useProgress = create<ProgressData & ProgressActions>()(
         endingSeen,
         hints,
         records,
+        floors,
       }),
     },
   ),
@@ -179,4 +146,21 @@ export function isUnlocked(id: PyramidId, artifacts: ProgressData['artifacts']):
 /** Anything worth a "Continue" on the title screen. */
 export function hasProgress(s: ProgressData): boolean {
   return Object.keys(s.deepest).length > 0 || Object.keys(s.artifacts).length > 0;
+}
+
+/** Stars held in a pyramid and the most it can give (3 per floor). */
+export function pyramidStars(floors: ProgressData['floors'], id: PyramidId): { stars: number; max: number } {
+  let stars = 0;
+  for (const rec of Object.values(floors[id] ?? {})) stars += starCount(rec);
+  return { stars, max: 3 * PYRAMIDS[id].floorCount };
+}
+
+/** Story fragment indices read in a pyramid, ascending (secret 0 of a fragment floor holds one). */
+export function fragmentsRead(floors: ProgressData['floors'], id: PyramidId, fragmentOf: (floorIndex: number) => number): number[] {
+  const out: number[] = [];
+  for (const [key, rec] of Object.entries(floors[id] ?? {})) {
+    const frag = fragmentOf(Number(key));
+    if (frag >= 0 && rec.f & 1) out.push(frag);
+  }
+  return out.sort((a, b) => a - b);
 }

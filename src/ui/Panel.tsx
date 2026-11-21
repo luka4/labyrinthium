@@ -1,6 +1,7 @@
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { uiSound } from '../audio/ui';
 import { colors, radius, space, type } from './theme';
 
 /**
@@ -19,6 +20,7 @@ export function Panel({
   /** tap on the scrim; omit to make the panel blocking */
   onDismiss?: () => void;
 }) {
+  useEffect(() => uiSound.panel(), []);
   return (
     <View style={styles.overlay} accessibilityViewIsModal>
       <Pressable style={StyleSheet.absoluteFill} onPress={onDismiss} accessible={false} />

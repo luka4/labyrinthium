@@ -101,6 +101,12 @@ function hashState(s: GameState, full = false): string {
       num(s.floorTime);
       num(s.idle);
     }
+    // plan 05: secrets (only once one is touched, so older hashes stay)
+    if (s.secretsFound || s.secretPhase.some((v) => v)) {
+      num(s.secretsFound);
+      for (const v of s.secretPhase) num(v);
+      for (const v of s.secretTimer) num(v);
+    }
     if (s.escape) {
       num(s.escape.taken ? 1 : 0);
       num(s.escape.t);

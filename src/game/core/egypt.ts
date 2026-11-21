@@ -92,3 +92,9 @@ export const EGYPT_ROWS: readonly EgyptRow[] = [
 
 /** 0-based camp floors (1-based 5, 10, 14, 17, 20, 22, 24, 25), placed by play time. */
 export const EGYPT_CAMPS = [4, 9, 13, 16, 19, 21, 23, 24] as const;
+
+/** Sealed chambers per floor (plan 05): 1 on floors 1-6, 2 on 7-16, 3 on 17-24, 2 in the basement = 50. */
+export const EGYPT_SECRETS = (i: number) => (i === 24 ? 2 : i < 6 ? 1 : i < 16 ? 2 : 3);
+
+/** 0-based floors whose first secret holds a painted story fragment (floors 3, 6, ... 21 and the basement). */
+export const EGYPT_FRAGMENT_FLOORS = [2, 5, 8, 11, 14, 17, 20, 24] as const;

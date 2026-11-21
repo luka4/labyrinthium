@@ -4,10 +4,14 @@ import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-na
 import type { PyramidInfo } from '../../game/core/pyramids';
 import { easeOutCubic } from '../../game/render/art';
 import { drawPyramidSide, sideLayout } from '../../game/render/drawPyramidSide';
+import { uiSound } from '../../audio/ui';
 import { ArtCanvas, useTicker } from '../../ui/ArtCanvas';
+import { haptic } from '../../ui/haptics';
+import { StarRow } from '../../ui/StarRow';
 import { colors, fonts, space, type } from '../../ui/theme';
+import { clock, starLabels, starStates, type OverviewResult } from './results';
 
-export type OverviewKind = 'enter' | 'descend' | 'resume' | 'fall' | 'escape';
+export type OverviewKind = 'enter' | 'descend' | 'resume' | 'fall' | 'escape' | 'replay';
 
 const easeInOut = (t: number) => {
   const q = Math.min(1, Math.max(0, t));
@@ -18,6 +22,10 @@ const SLIDE_MS = 650;
 const SHOW_MS = 2400;
 /** the climb up the escape shaft takes longer than a floor change */
 const ESCAPE_MS = 3200;
+/** with a result: the stars pop one after the other, so the overview stays up longer (a tap still skips) */
+const SHOW_RESULT_MS = 3000;
+const ESCAPE_RESULT_MS = 3800;
+const POP_AT = [800, 1050, 1300] as const;
 
 /**
  * Between floors: the pyramid in profile, the torch sliding down one tier.
@@ -31,6 +39,7 @@ export function FloorOverview({
   artifactTaken,
   reducedMotion,
   onDone,
+  result,
 }: {
   pyramid: PyramidInfo;
   from: number;
@@ -39,16 +48,45 @@ export function FloorOverview({
   artifactTaken: boolean;
   reducedMotion: boolean;
   onDone: () => void;
+  /** stars and time of the floor just left (descend, fall, escape) */
+  result?: OverviewResult;
 }) {
   const { width: screenW } = useWindowDimensions();
   const width = Math.min(screenW - space.lg * 2, 440);
-  const height = Math.round(width * 0.8);
+  const height = Math.round(width * (result ? 0.62 : 0.8));
   const time = useTicker(30);
 
+  const states = result ? starStates(result) : null;
   useEffect(() => {
-    const id = setTimeout(onDone, kind === 'escape' ? ESCAPE_MS : SHOW_MS);
+    const ms = kind === 'escape' ? (result ? ESCAPE_RESULT_MS : ESCAPE_MS) : result ? SHOW_RESULT_MS : SHOW_MS;
+    const id = setTimeout(onDone, ms);
     return () => clearTimeout(id);
-  }, [onDone, kind]);
+  }, [onDone, kind, result]);
+
+  // the sound of the change, and the chimes with the stars won this run (all at once, one chime, with reduced motion)
+  useEffect(() => {
+    if (kind === 'descend') uiSound.descend();
+    else if (kind === 'fall') uiSound.fall();
+    else if (kind === 'escape') uiSound.escapeOut();
+    if (!states) return;
+    const ids: Array<ReturnType<typeof setTimeout>> = [];
+    let first = true;
+    states.forEach((st, i) => {
+      if (st !== 'earned') return;
+      const at = reducedMotion ? 0 : POP_AT[i];
+      const chime = !reducedMotion || first;
+      first = false;
+      ids.push(
+        setTimeout(() => {
+          if (chime) uiSound.star(i as 0 | 1 | 2);
+          haptic.play('star');
+        }, at),
+      );
+    });
+    if (result?.newBest) ids.push(setTimeout(() => uiSound.newBest(), reducedMotion ? 200 : 1600));
+    return () => ids.forEach(clearTimeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const N = pyramid.floorCount;
   const current = reducedMotion ? to : from + (to - from) * easeOutCubic(time / SLIDE_MS);
@@ -69,11 +107,15 @@ export function FloorOverview({
           : `Camp · floor ${to + 1}`
         : kind === 'fall'
           ? 'The floor gave way'
-          : `Floor ${to + 1} of ${N}`;
+          : kind === 'replay'
+            ? `Floor ${to + 1}`
+            : `Floor ${to + 1} of ${N}`;
   const line =
     kind === 'escape'
       ? `Daylight. The ${pyramid.artifact} is yours.`
-      : left === 0
+      : kind === 'replay'
+        ? `Floor ${to + 1} again, with a fresh torch. Stars and secrets are kept.`
+        : left === 0
       ? `The basement, where the ${pyramid.artifact} ${keep}. Find it.`
       : `Floor ${to + 1} of ${N}. ${left} ${left === 1 ? 'floor' : 'floors'} to the basement, where the ${pyramid.artifact} ${keep}.`;
 
@@ -108,6 +150,17 @@ export function FloorOverview({
           </Text>
         )}
       </View>
+      {result && states && (
+        <View style={styles.result}>
+          <StarRow states={states} labels={starLabels(result)} time={reducedMotion ? 99999 : time} popAt={reducedMotion ? [0, 0, 0] : POP_AT} />
+          <Text style={styles.times}>
+            {result.cleared ? clock(result.time) : 'Not cleared'} · par {clock(result.par)}
+            {result.best !== null ? ` · best ${clock(result.best)}` : ''}
+            {result.newBest ? '  ' : ''}
+            {result.newBest ? <Text style={styles.newBest}>New best</Text> : null}
+          </Text>
+        </View>
+      )}
       <Text style={[type.body, styles.line]}>{line}</Text>
       <Text style={type.caption}>Tap to continue</Text>
     </Pressable>
@@ -127,4 +180,7 @@ const styles = StyleSheet.create({
   marker: { position: 'absolute', color: colors.ink, fontFamily: fonts.bodySemi, fontSize: 15 },
   chamber: { position: 'absolute', color: '#d8c49a', fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
   line: { textAlign: 'center', color: colors.muted, maxWidth: 440 },
+  result: { alignItems: 'center', gap: space.xs },
+  times: { color: colors.ink, fontFamily: fonts.bodySemi, fontSize: 14, fontVariant: ['tabular-nums'] },
+  newBest: { color: colors.gold, fontFamily: fonts.bodySemi },
 });

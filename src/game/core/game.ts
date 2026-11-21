@@ -20,6 +20,7 @@ import {
 import { EXIT_LIGHT, takeArtifact, tickEscape, type EscapeRun } from './escape';
 import { NOISE, QUIET_GAP, followGap, noteGuardianSeen, startGuardian, tickGuardian, touchIfMet, type GuardianRun } from './guardian';
 import { bfsFrom } from './graph';
+import { pushSeal, secretAtSeal, takeSecretAt, tickSecrets, type TreasureKind } from './secrets';
 import { emit, lightSpare, noise, setHand } from './runtime';
 import { LAND_STUN, pressPlate, resolveLanding, tickTraps } from './traps';
 import { clearLine, computeLight } from './vision';
@@ -81,8 +82,13 @@ export type GameEvent = {
     | 'snuffed'
     | 'caught'
     | 'artifactTaken'
-    | 'exitOpened';
-  kind: ItemKind | FixtureKind | TrapKind | null;
+    | 'exitOpened'
+    | 'secretKnock'
+    | 'secretBreak'
+    | 'secretOpen'
+    | 'treasure'
+    | 'fragment';
+  kind: ItemKind | FixtureKind | TrapKind | TreasureKind | null;
   /** the tile it happened on (stereo sound, haptics), or -1 */
   at: number;
 };
@@ -168,6 +174,12 @@ export type GameState = {
   floorTime: number;
   /** pending [tile, radius] pairs the guardian will hear */
   noises: number[];
+  /** per secret: 0 sealed, 1 knocked (hollow), 2 breaking, 3 open (secrets.ts) */
+  secretPhase: Uint8Array;
+  /** per secret: seconds of breaking left */
+  secretTimer: Float32Array;
+  /** bitmask of the secrets whose grave good you took this run */
+  secretsFound: number;
 };
 
 export type StartOptions = {
@@ -263,6 +275,9 @@ export function startFloor(
     idle: 1,
     floorTime: 0,
     noises: [],
+    secretPhase: new Uint8Array(floor.secrets.length),
+    secretTimer: new Float32Array(floor.secrets.length),
+    secretsFound: 0,
   };
   state.walkedAt[floor.start] = 0;
   if (opts.landing) {
@@ -451,7 +466,13 @@ export function step(s: GameState, action: Action): GameState {
         noise(s, next, NOISE.bump);
         return s;
       }
-      if (solid[next]) return s;
+      if (solid[next]) {
+        if (action.dir === 3) {
+          const k = secretAtSeal(s.floor, next);
+          if (k >= 0 && s.pos === s.floor.secrets[k].front) pushSeal(s, k);
+        }
+        return s;
+      }
       const quiet = s.idle >= QUIET_GAP;
       s.idle = 0;
       // carry the unused part of the last tick over: an exact cadence at any frame rate; wading is slower
@@ -466,6 +487,7 @@ export function step(s: GameState, action: Action): GameState {
       s.walkedAt[next] = s.trail;
       const seq0 = s.eventSeq;
       pickUp(s);
+      takeSecretAt(s);
       lightFixtures(s);
       if (s.eventSeq !== seq0 && s.events.some((e) => e.seq > seq0 && (e.type === 'pickup' || e.type === 'refill' || e.type === 'lit'))) noise(s, next, NOISE.pickup);
       if (next === s.floor.stairs) {
@@ -499,6 +521,7 @@ export function step(s: GameState, action: Action): GameState {
       tickTraps(s, action.seconds);
       tickCollapse(s, action.seconds);
       tickEscape(s, action.seconds);
+      tickSecrets(s, action.seconds);
       tickGuardian(s, action.seconds);
       if (s.solidDirty) {
         s.solidDirty = false;

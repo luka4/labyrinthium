@@ -48,3 +48,4 @@ Note: phase 2 lists "real art"; it is delivered by phase 4 for all pyramids at o
 | Phase | State |
 |---|---|
 | 1 · Prototype (tasks 01–02) | done 2026-11-21 (`996fb66`, `788b670`); device feel and FPS not yet checked on a phone |
+| 2 · Egypt complete (tasks 03–05) | done 2026-11-21 (`e8bd339`, `3dfcdb0`, task 05); sound and haptics unheard and untouched on a device, audio-api not yet confirmed in a dev build (see `plan_05_question.md`, Implementation decisions) |

@@ -8,6 +8,7 @@ import { isUnlocked, sealsFilled, useProgress } from '../state/progress';
 import { useReducedMotion } from '../state/settings';
 import { ArtCanvas, useTicker } from '../ui/ArtCanvas';
 import { Button, IconButton } from '../ui/Button';
+import { uiSound } from '../audio/ui';
 import { haptic } from '../ui/haptics';
 import { Panel, PanelActions, PanelText } from '../ui/Panel';
 import { Screen, TopBar } from '../ui/Screen';
@@ -60,10 +61,12 @@ export default function MapScreen() {
   useEffect(() => {
     if (filling && fill >= 1 && !fillFelt.current) {
       fillFelt.current = true;
+      uiSound.seal();
       haptic.bump();
     }
     if (unlockPending && unlock > 0.6 && !doorFelt.current) {
       doorFelt.current = true;
+      uiSound.seal();
       haptic.heavy();
     }
     if (allSeals && !blackUnlockSeen && unlock >= 1) useProgress.getState().markBlackUnlockSeen();

@@ -11,6 +11,8 @@ import { profileFor } from '../src/game/core/architecture';
 import { DIRS, TILE, distancesFrom, type Floor, type RoomKind, type TrapKind } from '../src/game/core/floor';
 import { addFeatures, floorFor, generateFloor, generateLayout, layoutFor, specFor } from '../src/game/core/generate';
 import { CARRY } from '../src/game/core/lights';
+import { runStarChecks } from './check-stars';
+import { checkSecretsFloor, newSecretStats, runSecretRules, secretsHash } from './check-secrets';
 import { checkGuardianFloor, placementHash, runGuardianChecks } from './check-guardian';
 import { runLightChecks } from './check-light-rules';
 import { KINDS, checkTraps, featHash, type TrapStats } from './check-traps';
@@ -271,6 +273,8 @@ let genMs = 0;
 let genCount = 0;
 const newStats = (): Record<TrapKind, TrapStats> => ({ block: { target: 0, placed: 0 }, portcullis: { target: 0, placed: 0 }, sandfall: { target: 0, placed: 0 }, trapdoor: { target: 0, placed: 0 } });
 const fixedStats = newStats();
+const fixedSecrets = newSecretStats();
+const fuzzSecrets = newSecretStats();
 const fuzzStats: Array<Record<TrapKind, TrapStats>> = Array.from({ length: 25 }, newStats);
 for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
   const p = PYRAMIDS[id];
@@ -296,6 +300,13 @@ for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
       if (placementHash(again) !== gh) fail(`${label}: guardian placement not deterministic`);
       snapshot[`${id}:${i}:g`] = gh;
       if (old[`${id}:${i}:g`] && old[`${id}:${i}:g`] !== gh && !args.includes('--update')) fail(`${label}: guardian snapshot changed (npm run check:floors -- --update)`);
+    }
+    checkSecretsFloor(label, p, i, f, { fail, warn }, true, id === 'egypt' ? fixedSecrets : undefined);
+    if (id === 'egypt') {
+      const sh = secretsHash(f);
+      if (secretsHash(again) !== sh) fail(`${label}: secrets not deterministic`);
+      snapshot[`${id}:${i}:sec`] = sh;
+      if (old[`${id}:${i}:sec`] && old[`${id}:${i}:sec`] !== sh && !args.includes('--update')) fail(`${label}: secrets snapshot changed (npm run check:floors -- --update)`);
     }
     if (old[`${id}:${i}`] && old[`${id}:${i}`] !== h && !args.includes('--update')) fail(`${label}: snapshot changed ${old[`${id}:${i}`]} -> ${h} (npm run check:floors -- --update)`);
     const m = check(label, f, i === p.floorCount - 1, i, isCampFloor(p, i));
@@ -346,6 +357,7 @@ for (let seed = 1; seed <= FUZZ_EARLY && failures <= 40; seed++) {
     const label = `egypt seed ${seed} floor ${i + 1}`;
     check(label, f, i === egypt.floorCount - 1, i, isCampFloor(egypt, i));
     checkGuardianFloor(label, pyr, i, f, { fail, warn });
+    checkSecretsFloor(label, pyr, i, f, { fail, warn }, false, fuzzSecrets);
     if (checkTraps(label, pyr, i, f, i + 1 < layouts.length ? floors[i + 1] : null, false, { fail, warn }, fuzzStats[i]).lowered) loweredCaps++;
     fuzzFloors++;
     if (i < 3 && f.loops) fail(`${label}: loops on an early floor`);
@@ -367,6 +379,14 @@ for (let i = 0; i < 25; i++) {
 const fixedShort = KINDS.filter((k) => fixedStats[k].placed < fixedStats[k].target).map((k) => `${k} ${fixedStats[k].placed}/${fixedStats[k].target}`);
 console.log(`fixed seed traps placed/target: ${KINDS.map((k) => `${k} ${fixedStats[k].placed}/${fixedStats[k].target}`).join(', ')}${fixedShort.length ? ' (short: ' + fixedShort.join(', ') + ')' : ''}`);
 
+{
+  const off = fixedSecrets.total ? fixedSecrets.offPath / fixedSecrets.total : 1;
+  console.log(`secrets: ${fixedSecrets.total} on the fixed seed (${(off * 100).toFixed(0)} % off the main path); fuzz ${fuzzSecrets.total} secrets, ${fuzzSecrets.short} of ${fuzzSecrets.floors} floors short of the full count`);
+  if (off < 0.8) fail(`secrets: only ${(off * 100).toFixed(0)} % of the fixed-seed secrets are off the main path (want >= 80 %)`);
+  if (fuzzSecrets.short > 0.1 * fuzzSecrets.floors) warn(`secrets: ${fuzzSecrets.short} of ${fuzzSecrets.floors} fuzz floors short of the full count`);
+}
+runSecretRules({ fail, warn });
+runStarChecks({ fail, warn });
 runTrapRules({ fail, warn });
 runGuardianChecks({ fail, warn });
 runLightChecks({ fail, warn, snapshot, old, update: args.includes('--update') });

@@ -1,7 +1,9 @@
 import { ClipOp, FilterMode, MipmapMode, Skia, TileMode, type SkCanvas, type SkImage, type SkPicture, type SkSurface } from '@shopify/react-native-skia';
 
 import { TILE, type Floor, type RoomKind, type Trap } from '../core/floor';
+import type { Secret } from '../core/secrets';
 import { fill, hash01, paint, rgba, stroke } from './art';
+import { drawCarvedChambers, drawSealedDoor } from './drawSecrets';
 import type { FloorTheme } from './themes';
 
 /**
@@ -38,6 +40,12 @@ export type FloorArt = {
   ensure: (win: TileWindow, budgetMs: number) => void;
   /** draws the chunks of the window; `t` = screen units per tile; the canvas is in world units * t */
   draw: (canvas: SkCanvas, win: TileWindow, t: number) => void;
+  /** records the carved copy of the floor (the chambers opened) ahead of `open`; call when a seal starts breaking */
+  prepareOpened: () => void;
+  /** a new run on this floor: the chambers are sealed again */
+  reset: () => void;
+  /** secret k opened: its chambers are drawn from the carved copy, the chunks it touches are rebuilt */
+  open: (k: number) => void;
   /** chunks rasterised so far (tests, tuning) */
   stats: () => { built: number; cached: number; capacity: number };
   dispose: () => void;
@@ -70,7 +78,10 @@ const SLABS: Record<RoomKind, [number, number, boolean]> = {
 export function createFloorArt(floor: Floor, theme: FloorTheme, px: number): FloorArt {
   const { size } = floor;
   const W = size * px;
-  const picture = recordFloor(floor, theme, px);
+  const picture = recordFloor(floor, theme, px, null);
+  let openedPicture: SkPicture | null = null;
+  /** px rectangles (the chamber, its walls and the doorway row) drawn from the carved copy */
+  const openedRegions: Rect[] = [];
   const nc = Math.ceil(size / CHUNK);
   const side = CHUNK * px + 2 * PAD;
   const capacity = Math.max(MIN_CHUNKS, Math.floor(CACHE_BYTES / (side * side * 4)));
@@ -95,10 +106,28 @@ export function createFloorArt(floor: Floor, theme: FloorTheme, px: number): Flo
     c.translate(PAD - cx * CHUNK * px, PAD - cy * CHUNK * px);
     c.clipRect(R(cx * CHUNK * px - PAD, cy * CHUNK * px - PAD, side, side), ClipOp.Intersect, false);
     c.drawPicture(picture);
+    for (const r of openedRegions) {
+      if (r.x >= (cx + 1) * CHUNK * px + PAD || r.y >= (cy + 1) * CHUNK * px + PAD || r.x + r.width <= cx * CHUNK * px - PAD || r.y + r.height <= cy * CHUNK * px - PAD) continue;
+      c.save();
+      c.clipRect(r, ClipOp.Intersect, false);
+      c.drawPicture(openedPicture!);
+      c.restore();
+    }
     c.restore();
     surface.flush();
     built++;
     return surface.makeImageSnapshot();
+  };
+
+  /** drops the cached chunks a region touches; the next ensure rebuilds them (the old image stays alive for a few calls) */
+  const retireOverlapping = (region: Rect) => {
+    for (const [ck, v] of [...cache]) {
+      const ccx = ck % nc;
+      const ccy = Math.floor(ck / nc);
+      if (region.x >= (ccx + 1) * CHUNK * px + PAD || region.y >= (ccy + 1) * CHUNK * px + PAD || region.x + region.width <= ccx * CHUNK * px - PAD || region.y + region.height <= ccy * CHUNK * px - PAD) continue;
+      retired.push({ image: v.image, at: tick });
+      cache.delete(ck);
+    }
   };
 
   const evict = () => {
@@ -169,8 +198,29 @@ export function createFloorArt(floor: Floor, theme: FloorTheme, px: number): Flo
           canvas.drawImageRectOptions(hit.image, R(0, 0, side, side), R((cx * CHUNK * px - PAD) * k, (cy * CHUNK * px - PAD) * k, side * k, side * k), FilterMode.Linear, MipmapMode.None);
         }
     },
+    prepareOpened() {
+      openedPicture ??= recordFloor(floor, theme, px, floor.secrets);
+    },
+    open(k) {
+      const sec = floor.secrets[k];
+      if (!sec) return;
+      openedPicture ??= recordFloor(floor, theme, px, floor.secrets);
+      // the chamber, a tile of wall around it, and the doorway row down to the tile in front (its shadow changes)
+      const { x, y, w, h } = sec.rect;
+      const fy = Math.floor(sec.front / size);
+      const region = R((x - 1) * px, (y - 1) * px, (w + 2) * px, (fy - y + 2) * px);
+      openedRegions.push(region);
+      retireOverlapping(region);
+    },
+    reset() {
+      if (!openedRegions.length) return;
+      const regions = openedRegions.splice(0);
+      for (const r of regions) retireOverlapping(r);
+    },
     stats: () => ({ built, cached: cache.size, capacity }),
     dispose() {
+      openedPicture?.dispose?.();
+      openedPicture = null;
       for (const v of cache.values()) v.image.dispose();
       cache.clear();
       for (const r of retired) r.image.dispose();
@@ -183,8 +233,23 @@ export function createFloorArt(floor: Floor, theme: FloorTheme, px: number): Flo
 }
 
 /** Records the whole floor's drawing once. With a bounds rect the native recorder keeps an RTree. */
-function recordFloor(floor: Floor, theme: FloorTheme, px: number): SkPicture {
-  const { size, tiles } = floor;
+function recordFloor(floor: Floor, theme: FloorTheme, px: number, carve: readonly Secret[] | null): SkPicture {
+  const { size } = floor;
+  // the carved copy (plan 05): every secret's chamber open, its seal a plain doorway; chamber tiles have no room (unpaved bedrock)
+  let tiles = floor.tiles;
+  let roomOf = floor.room;
+  if (carve) {
+    tiles = floor.tiles.slice();
+    roomOf = floor.room.slice();
+    for (const sec of carve) {
+      for (const t of sec.tiles) {
+        tiles[t] = TILE.FLOOR;
+        roomOf[t] = -1;
+      }
+      tiles[sec.seal] = TILE.FLOOR;
+      roomOf[sec.seal] = floor.room[sec.front];
+    }
+  }
   const W = size * px;
   const recorder = Skia.PictureRecorder();
   const c = recorder.beginRecording(R(0, 0, W, W));
@@ -198,13 +263,14 @@ function recordFloor(floor: Floor, theme: FloorTheme, px: number): SkPicture {
   };
   const roomKindAt = (x: number, y: number): RoomKind | null => {
     if (x < 0 || y < 0 || x >= size || y >= size) return null;
-    const r = floor.room[y * size + x];
+    const r = roomOf[y * size + x];
     return r >= 0 ? floor.rooms[r].kind : null;
   };
   const line = Math.max(1, px * 0.045);
 
   drawMasonry(c);
   drawPaving(c);
+  if (carve) drawCarvedChambers(c, carve, size, px, theme);
   drawContactShadows(c);
   drawObjects(c);
   drawTelltales(c);
@@ -312,13 +378,13 @@ function recordFloor(floor: Floor, theme: FloorTheme, px: number): SkPicture {
     for (let y = 0; y < size; y++) {
       let x = 0;
       while (x < size) {
-        const r = tiles[y * size + x] === TILE.ROCK ? -1 : floor.room[y * size + x];
+        const r = tiles[y * size + x] === TILE.ROCK ? -1 : roomOf[y * size + x];
         if (r < 0) {
           x++;
           continue;
         }
         const x0 = x;
-        while (x < size && tiles[y * size + x] !== TILE.ROCK && floor.room[y * size + x] === r) x++;
+        while (x < size && tiles[y * size + x] !== TILE.ROCK && roomOf[y * size + x] === r) x++;
         runs[r].push(x0, y, x - x0);
       }
     }
@@ -578,6 +644,7 @@ function recordFloor(floor: Floor, theme: FloorTheme, px: number): SkPicture {
    */
   function drawTelltales(canvas: SkCanvas) {
     if (floor.exit >= 0) falseDoor(canvas, floor.exit % size, Math.floor(floor.exit / size));
+    if (!carve) for (const sec of floor.secrets) drawSealedDoor(canvas, sec.seal, size, px, theme);
     for (const t of floor.traps) {
       const x = t.tile % size;
       const y = Math.floor(t.tile / size);

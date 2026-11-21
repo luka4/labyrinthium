@@ -27,6 +27,7 @@ import { buildSandOrder, extendSandOrder } from './collapse';
 import { placeBraziers, placeLights } from './placeLights';
 import { placeExit } from './escape';
 import { placeGuardian } from './guardian';
+import { placeSecrets } from './secrets';
 import { placeTraps } from './traps';
 import { createRng, shuffle } from './rng';
 
@@ -506,6 +507,19 @@ export function addFeatures(layout: Layout, spec: GenSpec, below: Layout | null)
   const guardian = row
     ? placeGuardian({ layout, row, items: lights.items, fixtures, traps: placed.traps, collapse, exit: door.exit, exitFront: door.exitFront, basement: spec.basement })
     : null;
+  const secrets = placeSecrets({
+    layout,
+    profile,
+    floorIndex: spec.floorIndex,
+    seed: spec.seed,
+    items: lights.items,
+    fixtures,
+    traps: placed.traps,
+    collapse,
+    exit: door.exit,
+    exitFront: door.exitFront,
+    guardian,
+  });
   return {
     ...rest,
     items: lights.items,
@@ -517,6 +531,7 @@ export function addFeatures(layout: Layout, spec: GenSpec, below: Layout | null)
     exit: door.exit,
     exitFront: door.exitFront,
     guardian,
+    secrets,
   };
 }
 

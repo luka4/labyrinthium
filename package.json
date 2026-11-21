@@ -21,6 +21,7 @@
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-native": "0.88.1",
+    "react-native-audio-api": "1.0.1",
     "react-native-gesture-handler": "~3.3.0",
     "react-native-reanimated": "4.7.1",
     "react-native-safe-area-context": "~5.11.1",
@@ -40,7 +41,9 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "check:floors": "tsx scripts/check-floors.ts"
+    "check:floors": "tsx scripts/check-floors.ts",
+    "sounds": "tsx scripts/make-sounds.ts",
+    "check:sounds": "tsx scripts/check-sounds.ts"
   },
   "private": true
 }

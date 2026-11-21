@@ -1,5 +1,6 @@
 import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from 'react-native';
 
+import { uiSound } from '../audio/ui';
 import { haptic } from './haptics';
 import { colors, fonts, radius, space } from './theme';
 
@@ -22,6 +23,7 @@ export function Button({ label, onPress, variant = 'secondary', disabled, style,
       disabled={disabled}
       onPress={() => {
         haptic.tap();
+        uiSound.tap();
         onPress();
       }}
       style={({ pressed }) => [
@@ -74,6 +76,7 @@ export function IconButton({ glyph, label, onPress }: { glyph: string; label: st
       hitSlop={8}
       onPress={() => {
         haptic.tap();
+        uiSound.tap();
         onPress();
       }}
       style={({ pressed }) => [iconStyles.button, pressed && { backgroundColor: colors.surfacePressed }]}

@@ -3,6 +3,7 @@ import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-nat
 
 import { router } from 'expo-router';
 
+import { uiSound } from '../audio/ui';
 import { PYRAMIDS, SEALS } from '../game/core/pyramids';
 import { sealsFilled, useProgress } from '../state/progress';
 import { useSettings, type Controls, type MotionSetting } from '../state/settings';
@@ -11,6 +12,27 @@ import { haptic } from '../ui/haptics';
 import { Panel, PanelActions, PanelText } from '../ui/Panel';
 import { Screen, TopBar } from '../ui/Screen';
 import { colors, fonts, radius, space, type } from '../ui/theme';
+
+type VolumeKey = 'low' | 'medium' | 'high';
+const VOLUMES = [
+  ['low', 'Low'],
+  ['medium', 'Medium'],
+  ['high', 'High'],
+] as const;
+const VOLUME_VALUE: Record<VolumeKey, number> = { low: 0.35, medium: 0.65, high: 1 };
+/** the step nearest to a stored volume (an old or hand-edited value snaps to Low / Medium / High) */
+function snapVolume(v: number): VolumeKey {
+  let best: VolumeKey = 'medium';
+  let d = Infinity;
+  for (const [k] of VOLUMES) {
+    const e = Math.abs(VOLUME_VALUE[k] - v);
+    if (e < d) {
+      d = e;
+      best = k;
+    }
+  }
+  return best;
+}
 
 export default function SettingsScreen() {
   const settings = useSettings();
@@ -23,13 +45,31 @@ export default function SettingsScreen() {
       <TopBar title="Settings" />
       <ScrollView contentContainerStyle={styles.content}>
         <Section title="Feel">
-          <ToggleRow label="Vibration" value={settings.haptics} onChange={(haptics) => settings.set({ haptics })} />
           <ToggleRow
-            label="Sound"
-            note="The game has no sound yet."
-            value={settings.sound}
-            onChange={(sound) => settings.set({ sound })}
+            label="Vibration"
+            note="Heartbeat of the guardian, traps, pickups."
+            value={settings.haptics}
+            onChange={(haptics) => settings.set({ haptics })}
           />
+        </Section>
+
+        <Section title="Sound">
+          <ToggleRow label="Sound" value={settings.sound} onChange={(sound) => settings.set({ sound })} />
+          <Text style={type.label}>Effects</Text>
+          <Segmented<VolumeKey>
+            value={snapVolume(settings.sfx)}
+            disabled={!settings.sound}
+            options={VOLUMES}
+            onChange={(k) => settings.set({ sfx: VOLUME_VALUE[k] })}
+          />
+          <Text style={type.label}>Ambience</Text>
+          <Segmented<VolumeKey>
+            value={snapVolume(settings.ambience)}
+            disabled={!settings.sound}
+            options={VOLUMES}
+            onChange={(k) => settings.set({ ambience: VOLUME_VALUE[k] })}
+          />
+          <Text style={type.caption}>Footsteps, flames and the guardian are heard from where they are: walls muffle them, rooms echo.</Text>
         </Section>
 
         <Section title="Controls">
@@ -136,7 +176,10 @@ function ToggleRow({ label, note, value, onChange }: { label: string; note?: str
       <Switch
         accessibilityLabel={label}
         value={value}
-        onValueChange={onChange}
+        onValueChange={(v) => {
+          uiSound.toggle();
+          onChange(v);
+        }}
         trackColor={{ false: colors.surfacePressed, true: '#a9852f' }}
         thumbColor={value ? colors.gold : colors.muted}
       />
@@ -148,22 +191,26 @@ function Segmented<T extends string>({
   value,
   options,
   onChange,
+  disabled,
 }: {
   value: T;
   options: ReadonlyArray<readonly [T, string]>;
   onChange: (v: T) => void;
+  disabled?: boolean;
 }) {
   return (
-    <View style={styles.segmented} accessibilityRole="radiogroup">
+    <View style={[styles.segmented, disabled && { opacity: 0.4 }]} accessibilityRole="radiogroup">
       {options.map(([key, label]) => {
         const selected = key === value;
         return (
           <Pressable
             key={key}
             accessibilityRole="radio"
-            accessibilityState={{ selected }}
+            accessibilityState={{ selected, disabled }}
+            disabled={disabled}
             onPress={() => {
               haptic.tap();
+              uiSound.toggle();
               onChange(key);
             }}
             style={[styles.segment, selected && styles.segmentOn]}

@@ -3,11 +3,14 @@ import { BlendMode, ClipOp, FilterMode, MipmapMode, Skia, type SkCanvas } from '
 import { isBasement, type GameState } from '../core/game';
 import { guardianCue } from '../core/guardian';
 import { STEP_SECONDS } from '../core/lights';
+import { SEAL } from '../core/secrets';
+import { clearLine } from '../core/vision';
 import { diamond, fill, glow, hash01, rgba } from './art';
 import { drawGuardian, drawGuardianGhost } from './drawGuardian';
 import { WISP_SECONDS, drawCarriedScarab, drawExit, drawPointer, drawScarab, drawWisp } from './drawEscape';
 import type { FloorArt } from './floorArt';
 import { createSandRenderer, type SandRenderer } from './drawSand';
+import { drawSecrets, type SecretFx } from './drawSecrets';
 import { drawTraps } from './drawTraps';
 import type { FloorTheme } from './themes';
 import { drawFixtureBody, drawFlame, drawGlint, drawItemBody, fixtureFlames, flameAnchor, softGlow } from './drawItems';
@@ -39,6 +42,8 @@ export type Frame = {
   fall: number;
   /** flames the guardian put out lately: the tile and the render time it happened (smoke wisps) */
   wisps: ReadonlyArray<{ at: number; t0: number }>;
+  /** push and pickup clocks of the secret chambers (plan 05) */
+  secretFx: SecretFx;
 };
 
 /** What the board draws besides the game state: the floor's art, the light mask, the sand and the palette. */
@@ -77,7 +82,9 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
   // a cold draught: your flame gutters and leans when the guardian is close behind the walls (render only)
   const cue = s.guardian ? guardianCue(s) : null;
   const draught = cue && !cue.visible && cue.path >= 0 && cue.path <= 8 && cue.mode !== 'dormant' ? (9 - cue.path) / 8 : 0;
-  const handF = flicker(style, time) * (1 - draught * 0.2 * (0.5 + 0.5 * Math.sin(time * 29) * Math.sin(time * 6.1)));
+  // an unopened seal close by: air draws through the plaster, the flame leans towards it and flickers a little more (render only)
+  const seal = sealDraught(s);
+  const handF = flicker(style, time) * (1 - draught * 0.2 * (0.5 + 0.5 * Math.sin(time * 29) * Math.sin(time * 6.1))) * (1 - seal.k * 0.08 * (0.5 + 0.5 * Math.sin(time * 23)));
 
   canvas.drawColor(rgba('#000000'));
   canvas.save();
@@ -124,6 +131,7 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
     drawFixtureBody(canvas, f.kind, cx(f.tile), f.kind === 'sconce' ? (Math.floor(f.tile / size)) * t : cy(f.tile), t, lit);
   });
   sand.draw(canvas, s, win, t, time);
+  if (s.floor.secrets.length) drawSecrets(canvas, s, theme, t, time, win, frame.secretFx);
   drawExit(canvas, s, theme, t, time);
   if (s.escape) drawScarab(canvas, cx(stairs), cy(stairs), t, s.escape.taken, time);
   else if (isBasement(s.pyramid, s.floorIndex)) artifact(canvas, cx(stairs), cy(stairs), t, handF);
@@ -174,7 +182,7 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
   // dropping through a trapdoor: smaller and darker into the pit
   const sink = s.status === 'falling' ? 1 - 0.75 * frame.fall : 1;
   drawPointer(canvas, s, px, py, t, time);
-  player(canvas, s, px, py + (1 - sink) * t * 0.2, t * sink, style.color, handF, (frame.prevPos === s.pos ? 0 : Math.sign(tx - fx) * (1 - prog)) + draught * 0.5, time);
+  player(canvas, s, px, py + (1 - sink) * t * 0.2, t * sink, style.color, handF, (frame.prevPos === s.pos ? 0 : Math.sign(tx - fx) * (1 - prog)) + draught * 0.5 + seal.lean, time);
   if (sink < 1) canvas.drawCircle(px, py, t * 0.5 * (1 - sink), fill(rgba('#000000', 0.5 * (1 - sink))));
   canvas.restore();
 }
@@ -213,4 +221,28 @@ function player(canvas: SkCanvas, s: GameState, x: number, y: number, t: number,
     const pulse = 0.5 + 0.5 * Math.sin(time * 4);
     softGlow(canvas, fxp, fyp, t * 0.2, 0.25 + 0.5 * pulse * (1 - s.ember / 6), EMBER_STYLE.color);
   }
+}
+
+/** 0..1 strength and the lean (flame angle / 12 degrees) of the draught of the nearest unopened seal within 3 tiles in clear line. */
+function sealDraught(s: GameState): { k: number; lean: number } {
+  const list = s.floor.secrets;
+  if (!list.length) return { k: 0, lean: 0 };
+  const { size } = s.floor;
+  const px = s.pos % size;
+  const py = (s.pos - px) / size;
+  let best = { k: 0, lean: 0 };
+  for (let i = 0; i < list.length; i++) {
+    if (s.secretPhase[i] === SEAL.OPEN) continue;
+    const sx = list[i].seal % size;
+    const sy = Math.floor(list[i].seal / size);
+    const d = Math.max(Math.abs(sx - px), Math.abs(sy - py));
+    if (d > 3) continue;
+    // sight to the tile in front of the doorway: the seal itself is rock
+    const fx = list[i].front % size;
+    const fy = Math.floor(list[i].front / size);
+    if (!clearLine(s.grid, px, py, fx, fy)) continue;
+    const k = (4 - d) / 4;
+    if (k > best.k) best = { k, lean: Math.sign(sx - px) * 0.5 * k };
+  }
+  return best;
 }

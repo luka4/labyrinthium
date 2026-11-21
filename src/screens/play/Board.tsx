@@ -4,6 +4,8 @@ import { memo, useEffect, useMemo, useRef, useState, type MutableRefObject } fro
 import type { GameState } from '../../game/core/game';
 import { createSandRenderer, drawGame, viewWindow, type View } from '../../game/render/drawGame';
 import { STRIP_H, drawLightHud } from '../../game/render/drawLightHud';
+import { secretAtSeal } from '../../game/core/secrets';
+import type { SecretFx } from '../../game/render/drawSecrets';
 import type { FloorArt } from '../../game/render/floorArt';
 import type { LightMask } from '../../game/render/lightMask';
 import type { FloorTheme } from '../../game/render/themes';
@@ -33,7 +35,7 @@ export const Board = memo(function Board(props: BoardProps) {
   const [picture, setPicture] = useState<SkPicture | null>(null);
   const latest = useRef(props);
   latest.current = props;
-  const anim = useRef({ floor: null as unknown, prevPos: 0, lastPos: 0, quakeSeq: 0, quakeAt: -10, fallAt: -1, wisps: [] as Array<{ at: number; t0: number }> });
+  const anim = useRef({ floor: null as unknown, prevPos: 0, lastPos: 0, quakeSeq: 0, quakeAt: -10, fallAt: -1, wisps: [] as Array<{ at: number; t0: number }>, fx: { knock: [], taken: [] } as SecretFx });
   const sand = useMemo(() => createSandRenderer(props.theme), [props.theme]);
   useEffect(() => () => sand.dispose(), [sand]);
 
@@ -49,6 +51,7 @@ export const Board = memo(function Board(props: BoardProps) {
         a.quakeSeq = s.eventSeq;
         a.fallAt = -1;
         a.wisps = [];
+        a.fx = { knock: [], taken: [] };
       } else if (s.pos !== a.lastPos) {
         a.prevPos = a.lastPos;
         a.lastPos = s.pos;
@@ -58,6 +61,9 @@ export const Board = memo(function Board(props: BoardProps) {
         if (e.seq > a.quakeSeq && e.type === 'quake') a.quakeAt = time;
         // a flame the guardian put out: a wisp of smoke for 1.5 s
         if (e.seq > a.quakeSeq && e.type === 'snuffed' && e.at >= 0) a.wisps.push({ at: e.at, t0: time });
+        // a push on the plaster and a grave good lifted: short effects (plan 05)
+        if (e.seq > a.quakeSeq && e.type === 'secretKnock') a.fx.knock.push({ k: secretAtSeal(s.floor, e.at), t0: time });
+        if (e.seq > a.quakeSeq && e.type === 'treasure') a.fx.taken.push({ k: s.floor.secrets.findIndex((x) => x.spot === e.at), t0: time });
       }
       if (a.wisps.length) a.wisps = a.wisps.filter((w) => time - w.t0 < 1.6);
       a.quakeSeq = s.eventSeq;
@@ -75,7 +81,7 @@ export const Board = memo(function Board(props: BoardProps) {
       } else a.fallAt = -1;
       const fall = a.fallAt < 0 ? 0 : Math.min(1, (time - a.fallAt) / 0.25);
       const view: View = { camX: p.cam.current.x + shakeX, camY: p.cam.current.y + shakeY, board: p.boardSize, tilePx: p.tilePx };
-      const frame = { time, prevPos: a.prevPos, fall, wisps: a.wisps };
+      const frame = { time, prevPos: a.prevPos, fall, wisps: a.wisps, secretFx: a.fx };
       // rasterise the floor art the view needs (chunks), then prefetch within a small budget
       const win = viewWindow(view, s.floor.size, 1);
       p.art?.ensure(win, 6);

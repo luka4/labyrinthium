@@ -4,11 +4,12 @@ import { Inter_400Regular } from '@expo-google-fonts/inter/400Regular';
 import { Inter_500Medium } from '@expo-google-fonts/inter/500Medium';
 import { Inter_600SemiBold } from '@expo-google-fonts/inter/600SemiBold';
 import { useFonts } from 'expo-font';
-import { SplashScreen, Stack } from 'expo-router';
+import { SplashScreen, Stack, usePathname } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
+import { getAmbience, initAudio } from '../audio';
 import { useProgress } from '../state/progress';
 import { useSettings } from '../state/settings';
 import { colors } from '../ui/theme';
@@ -39,6 +40,14 @@ export default function RootLayout() {
   useEffect(() => {
     if (ready) SplashScreen.hideAsync();
   }, [ready]);
+
+  // sound: the engine and the core sounds start with the app; the title, the map and the menus hear the night wind, a run its own beds
+  const pathname = usePathname();
+  useEffect(() => {
+    if (!ready) return;
+    initAudio();
+    getAmbience().exterior(!pathname.startsWith('/play'));
+  }, [ready, pathname]);
 
   if (!ready) return null;
 
