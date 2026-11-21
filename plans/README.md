@@ -42,3 +42,9 @@ Note: phase 2 lists "real art"; it is delivered by phase 4 for all pyramids at o
 ## Question logs
 
 `plan_NN_question.md`: every open question or decision for that task, the options, and the answer picked (best for the end user in graphics and realism, most accurate technically, unless that makes the app too heavy or slow on a budget phone like the Redmi 9). Implementation agents append to the same file.
+
+## Status
+
+| Phase | State |
+|---|---|
+| 1 · Prototype (tasks 01–02) | done 2026-11-21 (`996fb66`, `788b670`); device feel and FPS not yet checked on a phone |
