@@ -44,6 +44,8 @@ export interface AudioEngine {
   duck(bus: Bus, dB: number, attack: number, hold: number, release: number): void;
   /** a bus level 0..1 (overlays fade the world to nothing) */
   setBusLevel(bus: Bus, level: number, ramp?: number): void;
+  /** a low-pass on a whole bus in Hz (the Jade Seal muffles the world); 0 = open */
+  setBusFilter(bus: Bus, hz: number, ramp?: number): void;
   setVolumes(v: Volumes): void;
   /** which reverb the room around the listener uses, and how much of the large one (0..1) */
   setRoom(size: 'small' | 'large', mix: number): void;

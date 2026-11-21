@@ -13,20 +13,24 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { isBasement, isCampFloor, lastCamp, startFloor, step, type Direction, type GameEvent, type GameState } from '../game/core/game';
+import { isBasement, isCampFloor, lastCamp, startFloor, startOn, step, type Direction, type GameState, type StartOptions } from '../game/core/game';
 import type { TrapKind } from '../game/core/floor';
+import { floorFor } from '../game/core/generate';
 import { KIND_NAME, STEP_SECONDS } from '../game/core/lights';
-import { TREASURE_NAME, popcount, secretAtSeal, type TreasureKind } from '../game/core/secrets';
-import type { PyramidInfo } from '../game/core/pyramids';
+import { POWER_ORDER, freshPowers, type PowerId } from '../game/core/powers';
+import { waterSandbox } from '../game/core/sandbox';
+import { BREATH, WET, waterAt } from '../game/core/water';
+import { popcount, secretAtSeal } from '../game/core/secrets';
+import { PYRAMIDS, type PyramidInfo } from '../game/core/pyramids';
 import { floorResult, parTime } from '../game/core/stars';
-import { storyOf } from '../game/story';
 import { STRIP_H } from '../game/render/drawLightHud';
 import { createFloorArt, type FloorArt } from '../game/render/floorArt';
 import { createLightMask } from '../game/render/lightMask';
-import { themeFor } from '../game/render/themes';
+import { captionFor, hintText, storyOf } from '../kits';
+import { renderKitFor } from '../kits/render';
 import { getAmbience, getEngine } from '../audio';
 import { createSoundDirector } from '../audio/director';
-import { useProgress, type HintId } from '../state/progress';
+import { ownedPowers, useProgress, type HintId } from '../state/progress';
 import { useReducedMotion, useSettings } from '../state/settings';
 import { Button, IconButton } from '../ui/Button';
 import { createHapticSequencer, fire, haptic } from '../ui/haptics';
@@ -34,7 +38,9 @@ import { clock as mmss2, starLabels, starStates, type OverviewResult } from './p
 import { StarRow } from '../ui/StarRow';
 import { Panel, PanelActions, PanelText } from '../ui/Panel';
 import { colors, fonts, space } from '../ui/theme';
-import { Board, STRIP_GAP } from './play/Board';
+import { Board, STRIP_GAP, powerBarHeight } from './play/Board';
+import { PowerBar, powerTextOf, type PowerText } from './play/PowerBar';
+import { BAR_GAP } from '../game/render/drawPowerBar';
 import { FloorOverview, type OverviewKind } from './play/FloorOverview';
 import { LightHud, type HudText } from './play/LightHud';
 import { useKeyboard } from './play/useKeyboard';
@@ -61,21 +67,13 @@ const ESCAPE_STEP_SECONDS = 0.3;
 const ART_BUDGET_PLAYING = 6;
 const ART_BUDGET_OVERVIEW = 8;
 
-/** One-time teaching captions: what a trap looks like, shown the first time it is lit (plan 03). */
-const HINTS: Record<HintId, string> = {
-  plate: 'A granite slab set in the limestone. A pressure plate.',
-  block: 'Chips of fallen stone around it.',
-  portcullis: 'A slab hangs in the slots above the passage.',
-  sandfall: 'Sand trickles from the ceiling here.',
-  trapdoor: 'A slab on pivots. It would drop you to the floor below.',
-  collapse: 'The ceiling over the stairs gives way. Get away from the sand.',
-  guardian: 'A guardian in linen and gold. Your light shows you to it; it hears you walk. Slow steps are quiet.',
-  guardianWake: 'Stone grinds somewhere. Something is awake.',
-  escape: 'A false door has opened somewhere. The Scarab points the way, briefly.',
-  secret: 'This plaster is newer than the stone around it. Push it.',
-};
+/** One-time teaching captions (what a trap looks like, powers, water) live in the kits: `hintText`. */
+
+/** What a run is: a descent saved to the progress, a replay of one floor, or the dev water sandbox (no saves at all). */
+export type RunMode = 'descent' | 'replay' | 'sandbox';
 
 const noop = (..._args: unknown[]) => {};
+const NO_POWERS: PowerText = [];
 
 const DIR: Record<'right' | 'left' | 'down' | 'up', Direction> = { right: 0, left: 1, down: 2, up: 3 };
 
@@ -92,7 +90,8 @@ type Phase =
   | { name: 'paused' }
   | { name: 'burntOut' }
   | { name: 'buried' }
-  | { name: 'caught' };
+  | { name: 'caught' }
+  | { name: 'drowned' };
 
 const campLabel = (floorIndex: number) => (floorIndex === 0 ? 'the top' : `camp · floor ${floorIndex + 1}`);
 
@@ -100,46 +99,6 @@ const mmss = (sec: number) => {
   const n = Math.max(0, Math.ceil(sec));
   return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
 };
-
-function captionFor(e: GameEvent): string | null {
-  const name = KIND_NAME[e.kind as keyof typeof KIND_NAME];
-  switch (e.type) {
-    case 'pickup':
-      return `+ ${name}`;
-    case 'refill':
-      return 'Oil refilled';
-    case 'lit':
-      return e.kind === 'sconce' ? 'Sconce lit' : e.kind === 'brazier' ? 'Brazier lit' : 'Candles lit';
-    case 'bagFull':
-      return 'Bag full';
-    case 'autoLight':
-      return `Spare lit: ${name}`;
-    case 'lowLight':
-      return 'Light running low';
-    case 'plate':
-      return 'Click.';
-    case 'hit':
-      return 'The stone knocks the light from your hand';
-    case 'guardianTouch':
-      return 'It smothers your light';
-    case 'guardianFollow':
-      return 'Footsteps on the stairs behind you';
-    case 'artifactTaken':
-      return 'The Golden Scarab is yours. The pyramid wakes.';
-    case 'exitOpened':
-      return 'Far off, stone grinds open. Air moves.';
-    case 'guardianHit':
-      return 'The stone falls on the guardian';
-    case 'secretKnock':
-      return 'It sounds hollow.';
-    case 'secretOpen':
-      return 'A hidden chamber';
-    case 'treasure':
-      return `+ ${TREASURE_NAME[e.kind as TreasureKind]}`;
-    default:
-      return null;
-  }
-}
 
 function hudOf(g: GameState, caption: HudText['caption']): HudText {
   const burning = g.hand.left > 0;
@@ -149,18 +108,39 @@ function hudOf(g: GameState, caption: HudText['caption']): HudText {
     low: !burning || g.hand.left < 10,
     spares: g.bag.map((b) => ({ label: `${KIND_NAME[b.kind]}, ${Math.ceil(b.left)} seconds` })),
     caption,
+    breath: g.water && g.breath < BREATH.max ? `${Math.max(0, Math.ceil(g.breath))} seconds of breath` : undefined,
+    powers: powerTextOf(g.powers),
   };
 }
 
-const hudKey = (h: HudText) => `${h.name}|${h.time}|${h.low}|${h.spares.map((s) => s.label).join(',')}|${h.caption?.id ?? ''}`;
+const hudKey = (h: HudText) =>
+  `${h.name}|${h.time}|${h.low}|${h.spares.map((s) => s.label).join(',')}|${h.caption?.id ?? ''}|${h.breath ?? ''}|${h.powers?.map((p) => p.label).join(',') ?? ''}`;
 
-export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: PyramidInfo; fromFloor: number; mode?: 'descent' | 'replay' }) {
-  const replay = mode === 'replay';
+/** the water sandbox floor (dev): Egypt floor 3 with shallow, deep and flooded water */
+const SANDBOX_FLOOR = 2;
+
+export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: PyramidInfo; fromFloor: number; mode?: RunMode }) {
+  const sandbox = mode === 'sandbox';
+  // a replay and the sandbox end with a result panel and never touch the descent
+  const replay = mode !== 'descent';
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const controls = useSettings((s) => s.controls);
   const reducedMotion = useReducedMotion();
   const artifactTaken = useProgress((s) => !!s.artifacts[pyramid.id]);
+  /** the powers you carry (the sandbox gives all four); owned artifacts never change during a run */
+  const [owned] = useState<PowerId[]>(() => (sandbox ? [...POWER_ORDER] : ownedPowers(useProgress.getState().artifacts)));
+  const hasPowers = owned.length > 0;
+  /** the numbers of the powers of a run on this pyramid (attuned where it matches) */
+  const runOpts = useCallback((): StartOptions => ({ powers: freshPowers(sandbox ? 'sandbox' : pyramid.id, owned) }), [sandbox, pyramid.id, owned]);
+  /** a run of this screen: the sandbox floor or a real one */
+  const begin = useCallback(
+    (floorIndex: number): GameState =>
+      sandbox
+        ? startOn(waterSandbox(floorFor(PYRAMIDS.egypt, SANDBOX_FLOOR)), PYRAMIDS.egypt, SANDBOX_FLOOR, undefined, undefined, 0, 0, runOpts())
+        : startFloor(pyramid, floorIndex, undefined, undefined, 0, 0, runOpts()),
+    [sandbox, pyramid, runOpts],
+  );
   const { reachFloor: reachFloorSaved, reachCamp: reachCampSaved, takeArtifact: takeArtifactSaved } = useProgress.getState();
   // a replayed floor never touches the descent: no checkpoint, no deepest floor, no artifact
   const reachFloor = replay ? noop : reachFloorSaved;
@@ -168,9 +148,10 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
   const takeArtifact = replay ? noop : takeArtifactSaved;
 
   const padSpace = controls === 'swipe' ? 0 : 150;
-  const boardSize = Math.max(200, Math.min(width - 32, 560, height - insets.top - insets.bottom - 90 - STRIP_H - STRIP_GAP - padSpace));
+  const boardSize = Math.max(200, Math.min(width - 32, 560, height - insets.top - insets.bottom - 90 - STRIP_H - STRIP_GAP - padSpace - powerBarHeight(hasPowers)));
 
-  const game = useRef<GameState>(startFloor(pyramid, fromFloor));
+  const [initialRun] = useState(() => begin(fromFloor));
+  const game = useRef<GameState>(initialRun);
   const [version, setVersion] = useState(0);
   const [phase, setPhase] = useState<Phase>({
     name: 'overview',
@@ -208,11 +189,13 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
   /** a hint caption: once per save per kind (`progress.hints`), up for HINT_SECONDS */
   const showHint = useCallback((id: HintId, captionId: number) => {
     if (useProgress.getState().hints[id]) return false;
-    caption.current = { id: captionId, text: HINTS[id], until: clock.current + HINT_SECONDS };
+    const text = hintText(pyramid.id, id);
+    if (!text) return false;
+    caption.current = { id: captionId, text, until: clock.current + HINT_SECONDS };
     useProgress.getState().markHint(id);
     hudDirty.current = true;
     return true;
-  }, []);
+  }, [pyramid.id]);
 
   /** the first time a trap of a new kind is lit: the plate hint first, the kind hint on the next sighting */
   const checkHints = useCallback(
@@ -221,6 +204,14 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
       if (escapeHintAt.current >= 0 && clock.current >= escapeHintAt.current) {
         escapeHintAt.current = -1;
         if (showHint('escape', g.floorIndex * 1000 + 700)) return;
+      }
+      // the first frames with an artifact power in the bar
+      if (g.powers.length && showHint('power', g.floorIndex * 1000 + 900)) return;
+      // the first water tile you see
+      if (g.water && !useProgress.getState().hints.water) {
+        for (let i = 0; i < g.water.length; i++) {
+          if (g.water[i] >= WET && g.light[i] >= 0.3 && showHint('water', g.floorIndex * 1000 + 901)) return;
+        }
       }
       const gd = g.guardian;
       if (gd && gd.pos >= 0 && gd.mode !== 'arriving' && gd.mode !== 'gone' && g.light[gd.pos] >= 0.3 && !useProgress.getState().hints.guardian) {
@@ -277,10 +268,14 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
           // a new run: this floor from the top of its stairs (or a retry): the plaster is whole again, the save's numbers are noted
           seenRun = g;
           artRef.current?.reset();
-          const rec = useProgress.getState().floors[pyramid.id]?.[g.floorIndex];
+          const rec = sandbox ? undefined : useProgress.getState().floors[pyramid.id]?.[g.floorIndex];
           startHeld.current = { s: rec?.s ?? 0, f: rec?.f ?? 0, t: rec?.t ?? null };
-          useProgress.getState().noteFloor(pyramid.id, g.floorIndex, g.floor.secrets.length);
+          if (!sandbox) useProgress.getState().noteFloor(pyramid.id, g.floorIndex, g.floor.secrets.length);
           getAmbience().enter(pyramid.id, g.floorIndex, pyramid.floorCount);
+          const wanted = new Set<string>();
+          if (owned.length) wanted.add('powers');
+          if (g.water) wanted.add('water');
+          for (const group of wanted) void getEngine().load(group as 'powers' | 'water');
         }
         // sound and haptic patterns (the same events feed the captions below)
         director.update(g, dt, true);
@@ -295,7 +290,7 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
             if (k >= 0) artRef.current?.open(k);
           } else if (e.type === 'treasure') {
             const k = g.floor.secrets.findIndex((x) => x.spot === e.at);
-            if (k >= 0) useProgress.getState().markSecret(pyramid.id, g.floorIndex, k, g.floor.secrets.length);
+            if (k >= 0 && !sandbox) useProgress.getState().markSecret(pyramid.id, g.floorIndex, k, g.floor.secrets.length);
           } else if (e.type === 'fragment') {
             const k = g.floor.secrets.findIndex((x) => x.spot === e.at);
             const fragment = k >= 0 ? g.floor.secrets[k].fragment : -1;
@@ -308,10 +303,11 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
             }
           }
           if (e.type === 'guardianStep') continue;
-          const text = captionFor(e);
+          const text = captionFor(e, g);
           if (text) caption.current = { id: e.seq + g.floorIndex * 1000, text, until: clock.current + CAPTION_SECONDS };
           if (e.type === 'quake') showHint('collapse', g.floorIndex * 1000 + e.seq);
           if (e.type === 'guardianWake') showHint('guardianWake', g.floorIndex * 1000 + e.seq);
+          if (e.type === 'flooded') showHint(owned.includes('naga') ? 'floodedNaga' : 'flooded', g.floorIndex * 1000 + e.seq);
           if (e.type === 'artifactTaken') escapeHintAt.current = clock.current + HINT_SECONDS;
           hudDirty.current = true;
         }
@@ -358,7 +354,7 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [walker, showHint, checkHints, director, seq, pyramid.id, pyramid.floorCount]);
+  }, [walker, showHint, checkHints, director, seq, pyramid.id, pyramid.floorCount, sandbox, owned]);
 
   // overlays and focus changes stop any walking in progress
   useEffect(() => {
@@ -370,12 +366,12 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
     (g: GameState): OverviewResult => {
       const r = floorResult(g);
       const held = startHeld.current;
-      useProgress.getState().recordFloor(pyramid.id, r);
-      if (replay && r.cleared && g.escape) useProgress.getState().recordEscape(pyramid.id, g.escape.t);
+      if (!sandbox) useProgress.getState().recordFloor(pyramid.id, r);
+      if (mode === 'replay' && r.cleared && g.escape) useProgress.getState().recordEscape(pyramid.id, g.escape.t);
       const best = r.cleared ? (held.t === null ? r.time : Math.min(held.t, r.time)) : held.t;
       return { ...r, best, newBest: r.cleared && held.t !== null && r.time < held.t, heldS: held.s, heldF: held.f, foundMask: g.secretsFound };
     },
-    [pyramid.id, replay],
+    [pyramid.id, mode, sandbox],
   );
 
   // react to the core status: stairs, basement, burnt out
@@ -424,6 +420,9 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
       setPhase({ name: 'buried' });
     } else if (status === 'caught') {
       setPhase({ name: 'caught' });
+    } else if (status === 'drowned') {
+      haptic.play('touch');
+      setPhase({ name: 'drowned' });
     } else if (status === 'escaped' && !leaving.current) {
       if (game.current.floor.exit >= 0) {
         // the step into the doorway plays for a moment, then the climb up the shaft
@@ -476,7 +475,16 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
     else if (p === 'paused') setPhase({ name: 'playing' });
   }, []);
 
-  useKeyboard(walker, phase.name === 'playing', togglePause);
+  const usePowerTap = useCallback((id: PowerId) => {
+    if (phaseRef.current.name !== 'playing') return;
+    game.current = step(game.current, { type: 'power', power: id });
+    hudDirty.current = true;
+  }, []);
+  const onPowerKey = useCallback((k: number) => {
+    // the keys are the sockets of the bar in order; a power you do not own does nothing
+    usePowerTap(POWER_ORDER[k]);
+  }, [usePowerTap]);
+  useKeyboard(walker, phase.name === 'playing', togglePause, onPowerKey);
 
   // a call or another app taking the audio pauses the run
   useEffect(() => {
@@ -598,7 +606,7 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
 
   /** replay: the same floor again with a fresh torch, or the next one */
   const playFloor = (floorIndex: number) => {
-    game.current = startFloor(pyramid, floorIndex);
+    game.current = begin(floorIndex);
     hudDirty.current = true;
     setPhase({ name: 'overview', from: floorIndex, to: floorIndex, kind: 'replay' });
     setVersion((v) => v + 1);
@@ -612,7 +620,8 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
   const viewTiles = Math.min(s.floor.size, VIEW_TILES);
   const tilePx = boardSize / viewTiles;
   const info = pyramid.color;
-  const theme = useMemo(() => themeFor(pyramid.id, info), [pyramid.id, info]);
+  const kit = useMemo(() => renderKitFor(pyramid.id), [pyramid.id]);
+  const theme = useMemo(() => kit.theme(info), [kit, info]);
   const px = Math.round(tilePx * Math.min(PixelRatio.get(), 2));
   // the architecture is recorded once per floor (hidden under the overview) and rasterised in chunks as you walk
   const art = useMemo(() => createFloorArt(s.floor, theme, px), [s.floor, theme, px]);
@@ -645,7 +654,7 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
     phase.name === 'paused'
       ? `Floor ${s.floorIndex + 1} · par ${mmss2(parTime(s.floor))} · secrets ${popcount(savedFound | s.secretsFound)} of ${s.floor.secrets.length} found here`
       : '';
-  const nextReplay = s.floorIndex + 1 <= (useProgress.getState().deepest[pyramid.id] ?? 0) && !isBasement(pyramid, s.floorIndex);
+  const nextReplay = !sandbox && s.floorIndex + 1 <= (useProgress.getState().deepest[pyramid.id] ?? 0) && !isBasement(pyramid, s.floorIndex);
   const tryAgain = () => playFloor(game.current.floorIndex);
   const out = replay ? () => router.back() : leaveToMap;
 
@@ -662,9 +671,10 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
         <View style={styles.hudSpacer} />
       </View>
 
-      <View style={{ width: boardSize, height: STRIP_H + STRIP_GAP + boardSize }}>
-        <Board game={game} cam={cam} art={art} theme={theme} mask={mask} reducedMotion={reducedMotion} boardSize={boardSize} tilePx={tilePx} drawRef={drawRef} />
+      <View style={{ width: boardSize, height: STRIP_H + STRIP_GAP + boardSize + powerBarHeight(hasPowers) }}>
+        <Board game={game} cam={cam} art={art} theme={theme} kit={kit} hasPowers={hasPowers} mask={mask} reducedMotion={reducedMotion} boardSize={boardSize} tilePx={tilePx} drawRef={drawRef} />
         <LightHud hud={hud} width={boardSize} onSwap={swap} />
+        {hasPowers && <PowerBar text={hud.powers ?? NO_POWERS} width={boardSize} top={STRIP_H + STRIP_GAP + boardSize + BAR_GAP} onUse={usePowerTap} />}
         <View
           style={{ position: 'absolute', left: 0, top: STRIP_H + STRIP_GAP, width: boardSize, height: boardSize }}
           onStartShouldSetResponder={() => controls !== 'pad'}
@@ -705,9 +715,7 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
 
       {phase.name === 'camp' && (
         <Panel eyebrow={`Camp · ${floorText}`} title="A place to rest">
-          <PanelText>
-            Progress is saved and your light burns full again (a torch, or your better source). If it goes out further down, you come back to this camp.
-          </PanelText>
+          <PanelText>Progress is saved. Your light burns full again and your artifacts' uses are restored.</PanelText>
           <PanelActions>
             <Button variant="primary" label="Continue the descent" onPress={() => setPhase({ name: 'playing' })} />
             <Button variant="ghost" label="Back to the map" onPress={leaveToMap} accessibilityHint="You can continue from this camp later" />
@@ -749,6 +757,16 @@ export function GameScreen({ pyramid, fromFloor, mode = 'descent' }: { pyramid: 
           <PanelActions>
             <Button variant="primary" label={replay ? 'Try again' : checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={replay ? tryAgain : retry} />
             <Button variant="ghost" label={replay ? 'Back' : 'Leave to the map'} onPress={out} />
+          </PanelActions>
+        </Panel>
+      )}
+
+      {phase.name === 'drowned' && (
+        <Panel eyebrow={floorText} title="Out of breath">
+          <PanelText>{replay ? 'The water was deeper than your breath.' : `The water was deeper than your breath. You come round at ${campLabel(checkpoint)}.`}</PanelText>
+          <PanelActions>
+            <Button variant="primary" label={replay ? 'Try again' : checkpoint === 0 ? 'Back to the top' : `Back to ${campLabel(checkpoint)}`} onPress={replay ? tryAgain : retry} />
+            <Button variant="ghost" label={replay ? 'Back' : 'Back to the map'} onPress={out} />
           </PanelActions>
         </Panel>
       )}

@@ -19,6 +19,7 @@ import { EGYPT_ROWS, ESCAPE_TARGET } from '../src/game/core/egypt';
 import { PYRAMIDS } from '../src/game/core/pyramids';
 import { createRng } from '../src/game/core/rng';
 import { exits, holdDir, runDir } from '../src/game/core/walk';
+import { hashRules } from '../src/game/core/plugins';
 
 type Report = { fail: (m: string) => void; warn: (m: string) => void; snapshot: Record<string, string>; old: Record<string, string>; update: boolean };
 
@@ -45,7 +46,7 @@ function go(s: GameState, dir: Direction): GameState {
   return step(s, { type: 'move', dir });
 }
 
-function hashState(s: GameState, full = false): string {
+export function hashState(s: GameState, full = false): string {
   let h = 0x811c9dc5;
   const mix = (v: number) => {
     h ^= v & 255;
@@ -112,6 +113,20 @@ function hashState(s: GameState, full = false): string {
       num(s.escape.t);
       num(s.escape.open ? 1 : 0);
     }
+    // plan 06: powers, water and plug-ins (only when present, so every older hash stays)
+    if (s.powers.length) {
+      num(s.powerGap);
+      for (const p of s.powers) {
+        num(p.uses);
+        num(p.left);
+      }
+    }
+    if (s.water) {
+      num(s.breath);
+      num(s.waterRev);
+      for (const v of s.water) mix(v);
+    }
+    hashRules(s, mix);
   }
   return h.toString(16);
 }

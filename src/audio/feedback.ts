@@ -66,4 +66,15 @@ export const FEEDBACK: Partial<Record<GameEvent['type'], Feedback>> = {
   secretOpen: { sound: 'seal.open', spatial: true, priority: 5 },
   treasure: { sound: 'pick.treasure', priority: 4, haptic: 'pickup' },
   fragment: { sound: 'fragment', priority: 4, haptic: 'found' },
+  // artifact powers (plan 06): interface sounds on the ui bus
+  powerUsed: { sound: (e) => (e.kind === 'scarab' || e.kind === 'mirror' || e.kind === 'naga' || e.kind === 'jade' ? `power.${e.kind}` : null), bus: 'ui', priority: 6, haptic: (e) => (e.kind === 'jade' ? 'freeze' : 'power') },
+  powerEnded: { sound: 'power.end', bus: 'ui', priority: 3 },
+  powerEmpty: { sound: 'power.empty', bus: 'ui', priority: 2, haptic: 'tap' },
+  // water: the footsteps in water carry the splash (the director picks water.wade / water.swim), so `splash` is a touch only
+  splash: { haptic: 'stepSand' },
+  dive: { sound: 'water.dive', spatial: true, priority: 5 },
+  surface: { sound: 'water.surface', spatial: true, priority: 5 },
+  breathLow: { sound: 'breath.low', priority: 6, haptic: 'breathLow' },
+  drowned: { sound: 'drowned', priority: 8, haptic: 'caught' },
+  flooded: { sound: 'water.wade', spatial: true, gain: 0.6, priority: 3, haptic: 'wall' },
 };

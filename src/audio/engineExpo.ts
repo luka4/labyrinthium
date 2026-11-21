@@ -102,6 +102,7 @@ export function createExpoEngine(audio: ExpoAudio): AudioEngine {
       overlay[b] = l;
       refresh();
     },
+    setBusFilter() {},
     setVolumes(v) {
       vol = v;
       refresh();

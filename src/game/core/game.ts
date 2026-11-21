@@ -24,6 +24,10 @@ import { pushSeal, secretAtSeal, takeSecretAt, tickSecrets, type TreasureKind } 
 import { emit, lightSpare, noise, setHand } from './runtime';
 import { LAND_STUN, pressPlate, resolveLanding, tickTraps } from './traps';
 import { clearLine, computeLight } from './vision';
+import { MIRROR_FALLOFF, carryPowers, handRadius, isActive, isFrozen, tickPowers, usePower, type PowerId, type PowerRun } from './powers';
+import { BREATH, FLOODED, SWIM, WATER_NOISE, WET, band, tickWater, waterAt, waterBlocks, waterPace, type WaterBand } from './water';
+import { blockedByRules, carryRules, movedRules, startRules, tickRules, type PluginEvents, type RunExt } from './plugins';
+import './rules';
 
 /**
  * Deterministic game core: no React, no rendering. The same seed and the same
@@ -49,12 +53,10 @@ export type Pyramid = {
  * buried: sand closed every way down (`retry`); caught: the guardian took you on embers (`retry`);
  * escaped: you left the basement (through the false door when it has one).
  */
-export type Status = 'playing' | 'descending' | 'falling' | 'burntOut' | 'buried' | 'caught' | 'escaped';
+export type Status = 'playing' | 'descending' | 'falling' | 'burntOut' | 'buried' | 'caught' | 'escaped' | 'drowned';
 
 /** What the UI may react to (captions, haptics). Only the last EVENT_LOG are kept. */
-export type GameEvent = {
-  seq: number;
-  type:
+export type CoreEventType =
     | 'pickup'
     | 'refill'
     | 'lit'
@@ -87,8 +89,22 @@ export type GameEvent = {
     | 'secretBreak'
     | 'secretOpen'
     | 'treasure'
-    | 'fragment';
-  kind: ItemKind | FixtureKind | TrapKind | TreasureKind | null;
+    | 'fragment'
+    | 'powerUsed'
+    | 'powerEnded'
+    | 'powerEmpty'
+    | 'splash'
+    | 'dive'
+    | 'surface'
+    | 'breathLow'
+    | 'drowned'
+    | 'flooded'
+    | 'sunkItem';
+
+export type GameEvent = {
+  seq: number;
+  type: CoreEventType | keyof PluginEvents;
+  kind: ItemKind | FixtureKind | TrapKind | TreasureKind | PowerId | WaterBand | null;
   /** the tile it happened on (stereo sound, haptics), or -1 */
   at: number;
 };
@@ -180,6 +196,23 @@ export type GameState = {
   secretTimer: Float32Array;
   /** bitmask of the secrets whose grave good you took this run */
   secretsFound: number;
+  /** the artifact powers you carry (powers.ts), in POWER_ORDER; empty when none */
+  powers: PowerRun[];
+  /** seconds until the next power may be used */
+  powerGap: number;
+  /** run copy of the floor's water levels (water.ts), or null on dry floors */
+  water: Uint8Array | null;
+  /** water as last seen (memory shows what you saw) */
+  seenWater: Uint8Array | null;
+  /** bumped whenever a level changes (the art rebuilds its paths) */
+  waterRev: number;
+  /** seconds of breath left (water.ts) */
+  breath: number;
+  breathWarned: boolean;
+  /** per-run state of rule plug-ins, by plug-in id */
+  ext: Partial<RunExt>;
+  /** a plug-in on this floor listens: noises are queued for it even without a guardian */
+  listening: boolean;
 };
 
 export type StartOptions = {
@@ -188,12 +221,17 @@ export type StartOptions = {
   skipped?: number;
   /** a guardian was after you on the floor above: it arrives after `gap` seconds of burning */
   follow?: { gap: number };
+  /** the artifact powers to carry (copied); absent = none */
+  powers?: PowerRun[];
+  /** per plug-in: what the previous floor's `carry` returned */
+  carry?: Record<string, unknown>;
 };
 
 export type Action =
   | { type: 'move'; dir: Direction }
   | { type: 'tick'; seconds: number }
   | { type: 'swap'; slot: number }
+  | { type: 'power'; power: PowerId }
   | { type: 'continue' }
   | { type: 'retry' };
 
@@ -225,7 +263,20 @@ export function startFloor(
   ember = 0,
   opts: StartOptions = {},
 ): GameState {
-  const floor = floorFor(pyramid, floorIndex);
+  return startOn(floorFor(pyramid, floorIndex), pyramid, floorIndex, hand, bag, steps, ember, opts);
+}
+
+/** A run on a given floor (the sandbox passes a floor that is not in the memo). */
+export function startOn(
+  floor: Floor,
+  pyramid: Pyramid,
+  floorIndex: number,
+  hand: Carried = startHand(),
+  bag: Carried[] = [],
+  steps = 0,
+  ember = 0,
+  opts: StartOptions = {},
+): GameState {
   const tiles = floor.size * floor.size;
   const items = new Map<number, Lying>();
   for (const it of floor.items) items.set(it.tile, { kind: it.kind, left: it.kind === 'oilJar' ? 0 : CARRY[it.kind].seconds });
@@ -278,7 +329,17 @@ export function startFloor(
     secretPhase: new Uint8Array(floor.secrets.length),
     secretTimer: new Float32Array(floor.secrets.length),
     secretsFound: 0,
+    powers: opts.powers ? opts.powers.map((p) => ({ ...p })) : [],
+    powerGap: 0,
+    water: floor.water ? floor.water.slice() : null,
+    seenWater: floor.water ? new Uint8Array(tiles) : null,
+    waterRev: 0,
+    breath: BREATH.max,
+    breathWarned: false,
+    ext: {},
+    listening: false,
   };
+  startRules(state, opts.carry);
   state.walkedAt[floor.start] = 0;
   if (opts.landing) {
     const land = resolveLanding(floor, opts.landing, floor.collapse, floor.guardian ? [floor.guardian.lair] : []);
@@ -307,11 +368,12 @@ function relight(s: GameState, moved: boolean) {
     s.handR = -1;
     s.fixedDirty = true;
   }
-  const r = s.hand.left > 0 ? radiusOf(CARRY[s.hand.kind], s.hand.left) : EMBER.radius;
-  const q = radiusQ(r);
+  const q = radiusQ(handRadius(s));
   const handChanged = moved || q !== s.handR;
   if (handChanged) {
-    computeLight(grid, s.pos, q, s.hand.left > 0 ? CARRY[s.hand.kind].falloff : EMBER.falloff, s.lightHand);
+    let falloff = s.hand.left > 0 ? CARRY[s.hand.kind].falloff : EMBER.falloff;
+    if (s.powers.length && isActive(s, 'mirror')) falloff -= MIRROR_FALLOFF;
+    computeLight(grid, s.pos, q, falloff, s.lightHand);
     s.handR = q;
   }
   const dirty = s.fixedDirty;
@@ -350,6 +412,7 @@ function relight(s: GameState, moved: boolean) {
     if (v > 0) {
       s.seenAt[i] = s.trail;
       s.seenSand[i] = Math.max(s.sand[i], s.localSand[i]);
+      if (s.seenWater) s.seenWater[i] = s.water![i];
     }
   }
 }
@@ -449,6 +512,8 @@ function wayDownLeft(s: GameState): boolean {
   return false;
 }
 
+const NO_NOISES: readonly number[] = [];
+
 /** Applies one action. Mutates and returns the state, or returns a new state on a floor change. */
 export function step(s: GameState, action: Action): GameState {
   switch (action.type) {
@@ -460,10 +525,15 @@ export function step(s: GameState, action: Action): GameState {
       const y = Math.floor(s.pos / size) + dy;
       const next = y * size + x;
       if (x < 0 || y < 0 || x >= size || y >= size) return s;
+      if (s.water && waterBlocks(s, next) && !solid[next]) {
+        emit(s, 'flooded', null, next);
+        return s;
+      }
+      if (!solid[next] && blockedByRules(s, next)) return s;
       const g = s.guardian;
-      if (g && (g.mode === 'dormant' || g.mode === 'waking') && g.pos === next) {
-        // a statue in the way: you bump it, and it hears that
-        noise(s, next, NOISE.bump);
+      if (g && g.pos === next && (g.mode === 'dormant' || g.mode === 'waking' || (s.powers.length && isFrozen(s) && g.mode !== 'gone' && g.mode !== 'arriving'))) {
+        // a statue in the way: you bump it, and it hears that (a frozen guardian hears nothing)
+        if (!(s.powers.length && isFrozen(s))) noise(s, next, NOISE.bump);
         return s;
       }
       if (solid[next]) {
@@ -476,7 +546,8 @@ export function step(s: GameState, action: Action): GameState {
       const quiet = s.idle >= QUIET_GAP;
       s.idle = 0;
       // carry the unused part of the last tick over: an exact cadence at any frame rate; wading is slower
-      const wade = sandLevel(s, next) >= COVER ? WADE : 1;
+      let wade = sandLevel(s, next) >= COVER ? WADE : 1;
+      if (s.water) wade = Math.max(wade, waterPace(s, next));
       s.cooldown = (s.cooldown > -STEP_SECONDS ? s.cooldown : 0) + STEP_SECONDS * wade;
       s.prevPos = s.pos;
       s.pos = next;
@@ -485,8 +556,15 @@ export function step(s: GameState, action: Action): GameState {
       s.burning = true;
       s.trail++;
       s.walkedAt[next] = s.trail;
+      if (s.water) {
+        const a = band(waterAt(s, s.prevPos));
+        const b = band(waterAt(s, next));
+        if (b === 'flooded' && a !== 'flooded') emit(s, 'dive', b, next);
+        else if ((a === 'flooded' || a === 'deep') && (b === 'shallow' || b === 'dry')) emit(s, 'surface', b, next);
+        else if (a === 'dry' && b !== 'dry') emit(s, 'splash', b, next);
+      }
       const seq0 = s.eventSeq;
-      pickUp(s);
+      if (!s.water || s.water[next] < SWIM) pickUp(s);
       takeSecretAt(s);
       lightFixtures(s);
       if (s.eventSeq !== seq0 && s.events.some((e) => e.seq > seq0 && (e.type === 'pickup' || e.type === 'refill' || e.type === 'lit'))) noise(s, next, NOISE.pickup);
@@ -500,7 +578,8 @@ export function step(s: GameState, action: Action): GameState {
         const k = s.floor.trapAt[next];
         if (k >= 0 && s.trapPhase[k] === 0) pressPlate(s, k, 'player');
       }
-      noise(s, next, quiet ? NOISE.quiet : NOISE.step);
+      movedRules(s);
+      noise(s, next, (quiet ? NOISE.quiet : NOISE.step) + (s.water && s.water[next] >= WET ? WATER_NOISE : 0));
       touchIfMet(s);
       relight(s, true);
       noteGuardianSeen(s);
@@ -518,11 +597,19 @@ export function step(s: GameState, action: Action): GameState {
       }
       const from = s.pos;
       s.floorTime += action.seconds;
-      tickTraps(s, action.seconds);
-      tickCollapse(s, action.seconds);
+      // the Jade Seal holds guardians, traps and sand still; evaluated once for the whole tick
+      const frozen = s.powers.length > 0 && isFrozen(s);
+      const heard = s.listening ? s.noises.slice() : NO_NOISES;
+      if (!frozen) tickTraps(s, action.seconds);
+      if (!frozen) tickCollapse(s, action.seconds);
       tickEscape(s, action.seconds);
       tickSecrets(s, action.seconds);
-      tickGuardian(s, action.seconds);
+      if (!frozen) tickGuardian(s, action.seconds);
+      else s.noises.length = 0;
+      tickRules(s, action.seconds, frozen, heard);
+      if (s.listening) s.noises.length = 0;
+      tickWater(s, action.seconds);
+      tickPowers(s, action.seconds);
       if (s.solidDirty) {
         s.solidDirty = false;
         if (s.status === 'playing' && !wayDownLeft(s)) {
@@ -532,6 +619,11 @@ export function step(s: GameState, action: Action): GameState {
       }
       relight(s, s.pos !== from);
       noteGuardianSeen(s);
+      return s;
+    }
+    case 'power': {
+      if (s.status !== 'playing') return s;
+      if (usePower(s, action.power)) relight(s, false);
       return s;
     }
     case 'swap': {
@@ -550,6 +642,8 @@ export function step(s: GameState, action: Action): GameState {
         return startFloor(s.pyramid, s.floorIndex + 1, s.hand, s.bag, s.steps, s.hand.left > 0 ? 0 : s.ember, {
           landing: trap?.landingWorld ?? undefined,
           skipped: s.skipped,
+          powers: carryPowers(s, false),
+          carry: carryRules(s),
         });
       }
       if (s.status !== 'descending') return s;
@@ -560,11 +654,16 @@ export function step(s: GameState, action: Action): GameState {
         const kind = CARRY[hand.kind].seconds >= CARRY.torch.seconds ? hand.kind : 'torch';
         hand = { kind, left: CARRY[kind].seconds };
       }
-      return startFloor(s.pyramid, next, hand, s.bag, s.steps, hand.left > 0 ? 0 : s.ember, { skipped: s.skipped, follow: followGap(s) });
+      return startFloor(s.pyramid, next, hand, s.bag, s.steps, hand.left > 0 ? 0 : s.ember, {
+        skipped: s.skipped,
+        follow: followGap(s),
+        powers: carryPowers(s, isCampFloor(s.pyramid, next)),
+        carry: carryRules(s),
+      });
     }
     case 'retry': {
-      if (s.status !== 'burntOut' && s.status !== 'buried' && s.status !== 'caught') return s;
-      return startFloor(s.pyramid, lastCamp(s.pyramid, s.floorIndex), startHand(), [], s.steps);
+      if (s.status !== 'burntOut' && s.status !== 'buried' && s.status !== 'caught' && s.status !== 'drowned') return s;
+      return startFloor(s.pyramid, lastCamp(s.pyramid, s.floorIndex), startHand(), [], s.steps, 0, { powers: carryPowers(s, true) });
     }
   }
 }

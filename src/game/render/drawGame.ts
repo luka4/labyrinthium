@@ -2,11 +2,15 @@ import { BlendMode, ClipOp, FilterMode, MipmapMode, Skia, type SkCanvas } from '
 
 import { isBasement, type GameState } from '../core/game';
 import { guardianCue } from '../core/guardian';
+import { isFrozen, power } from '../core/powers';
+import type { RenderKit } from '../../kits/types';
 import { STEP_SECONDS } from '../core/lights';
 import { SEAL } from '../core/secrets';
 import { clearLine } from '../core/vision';
 import { diamond, fill, glow, hash01, rgba } from './art';
-import { drawGuardian, drawGuardianGhost } from './drawGuardian';
+import { drawGuardianGhost } from './drawGuardian';
+import { FROZEN_TINT, drawJadeOverlay, drawPowerAura, drawScarabMotes } from './drawPowers';
+import { createWaterRenderer, type WaterRenderer } from './drawWater';
 import { WISP_SECONDS, drawCarriedScarab, drawExit, drawPointer, drawScarab, drawWisp } from './drawEscape';
 import type { FloorArt } from './floorArt';
 import { createSandRenderer, type SandRenderer } from './drawSand';
@@ -44,10 +48,12 @@ export type Frame = {
   wisps: ReadonlyArray<{ at: number; t0: number }>;
   /** push and pickup clocks of the secret chambers (plan 05) */
   secretFx: SecretFx;
+  /** the clock of mechanisms (sand, trap dust, guardian sway): stops while the Jade Seal holds them */
+  mechTime: number;
 };
 
 /** What the board draws besides the game state: the floor's art, the light mask, the sand and the palette. */
-export type Layers = { art: FloorArt | null; mask: LightMask; sand: SandRenderer; theme: FloorTheme };
+export type Layers = { art: FloorArt | null; mask: LightMask; sand: SandRenderer; theme: FloorTheme; water: WaterRenderer; kit: RenderKit };
 
 /**
  * The tiles to render around the camera: the view plus `margin` tiles, clamped to the floor.
@@ -62,7 +68,7 @@ export function viewWindow(view: Pick<View, 'camX' | 'camY' | 'board' | 'tilePx'
   return { x0, y0, x1, y1, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
-export { createSandRenderer };
+export { createSandRenderer, createWaterRenderer };
 
 const layerPaint = Skia.Paint();
 const maskPaint = Skia.Paint();
@@ -72,10 +78,12 @@ maskPaint.setBlendMode(BlendMode.DstIn);
 const MAX_FIXED_TINTS = 10;
 
 export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: View, frame: Frame) {
-  const { art, mask, sand, theme } = layers;
+  const { art, mask, sand, theme, water, kit } = layers;
   const { size, stairs } = s.floor;
   const { board, tilePx: t } = view;
   const time = frame.time;
+  const mech = frame.mechTime;
+  const frozen = s.powers.length > 0 && isFrozen(s);
   const prog = Math.min(1, Math.max(0, 1 - s.cooldown / STEP_SECONDS));
 
   const style = s.hand.left > 0 ? LIGHT_STYLE[s.hand.kind] : EMBER_STYLE;
@@ -116,7 +124,8 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
   const win = viewWindow(view, size, 2);
   canvas.saveLayer(layerPaint);
   art?.draw(canvas, win, t);
-  drawTraps(canvas, s, theme, t, win, { time, fall: frame.fall });
+  if (s.water) water.draw(canvas, s, win, t, time, theme);
+  drawTraps(canvas, s, theme, t, win, { time: mech, fall: frame.fall });
 
   // things lying on the floor and the bodies of fixtures: they sit under the light mask
   for (const [i, it] of s.items) {
@@ -130,7 +139,7 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
     // sconces sit on the wall face above their tile: pass the tile's top edge
     drawFixtureBody(canvas, f.kind, cx(f.tile), f.kind === 'sconce' ? (Math.floor(f.tile / size)) * t : cy(f.tile), t, lit);
   });
-  sand.draw(canvas, s, win, t, time);
+  sand.draw(canvas, s, win, t, mech);
   if (s.floor.secrets.length) drawSecrets(canvas, s, theme, t, time, win, frame.secretFx);
   drawExit(canvas, s, theme, t, time);
   if (s.escape) drawScarab(canvas, cx(stairs), cy(stairs), t, s.escape.taken, time);
@@ -142,15 +151,27 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
   }
   if (s.guardian) {
     drawGuardianGhost(canvas, s, t);
-    drawGuardian(canvas, s, theme, t, time);
+    // the hunter's look comes from the pyramid's kit (the Keeper in Egypt); a frozen one is tinted jade
+    const hunter = kit.hunters?.[s.floor.guardian?.kind ?? 'keeper'];
+    if (hunter) {
+      if (frozen) canvas.saveLayer(FROZEN_TINT);
+      hunter.draw(canvas, s, { theme, t, time, mechTime: mech, win });
+      if (frozen) canvas.restore();
+    }
   }
+  const hookCtx = { theme, t, time, mechTime: mech, win };
+  if (kit.draw?.floor) for (const h of kit.draw.floor) h(canvas, s, hookCtx);
 
   const lit = mask.render(s, prog, handF, 1, win);
   if (lit) canvas.drawImageRectOptions(lit.image, { x: 0, y: 0, width: lit.w * 2, height: lit.h * 2 }, { x: lit.x0 * t, y: lit.y0 * t, width: lit.w * t, height: lit.h * t }, FilterMode.Linear, MipmapMode.None, maskPaint);
 
+  if (kit.draw?.overlay) for (const h of kit.draw.overlay) h(canvas, s, hookCtx);
+
   // coloured light on whatever the mask let through: the hand light, then each lit fixture
   const handReach = (s.handR + 1) * t * handF;
   softGlow(canvas, px, py - t * 0.15, handReach, style.tint * (s.hand.left > 0 ? 1 : 0.8), style.color, BlendMode.SrcATop);
+  // the Mirror: a cool silver rim on the pool of light
+  if (s.powers.length && power(s, 'mirror')?.left) softGlow(canvas, px, py - t * 0.15, handReach * 0.92, 0.16, '#cfd3f0', BlendMode.SrcATop);
   let tints = 0;
   s.floor.fixtures.forEach((f, k) => {
     const left = s.fixtureLeft[k];
@@ -179,12 +200,19 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
     });
   });
 
+  // the Scarab's gold motes along the way down, over the dark
+  if (s.powers.length) drawScarabMotes(canvas, s, px, py, t, time);
+  if (kit.draw?.emissive) for (const h of kit.draw.emissive) h(canvas, s, hookCtx);
+
   // dropping through a trapdoor: smaller and darker into the pit
   const sink = s.status === 'falling' ? 1 - 0.75 * frame.fall : 1;
   drawPointer(canvas, s, px, py, t, time);
   player(canvas, s, px, py + (1 - sink) * t * 0.2, t * sink, style.color, handF, (frame.prevPos === s.pos ? 0 : Math.sign(tx - fx) * (1 - prog)) + draught * 0.5 + seal.lean, time);
   if (sink < 1) canvas.drawCircle(px, py, t * 0.5 * (1 - sink), fill(rgba('#000000', 0.5 * (1 - sink))));
+  if (s.powers.length || s.water) drawPowerAura(canvas, s, px, py, t, time);
   canvas.restore();
+  // time held still: a jade vignette over the whole board
+  if (frozen) drawJadeOverlay(canvas, s, board, time);
 }
 
 function artifact(canvas: SkCanvas, x: number, y: number, t: number, flick: number) {

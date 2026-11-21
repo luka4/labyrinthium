@@ -1,6 +1,10 @@
 import { COVER, sandLevel } from '../game/core/collapse';
 import type { GameEvent, GameState } from '../game/core/game';
-import { QUIET_GAP, guardianCue } from '../game/core/guardian';
+import { QUIET_GAP } from '../game/core/guardian';
+import { isFrozen } from '../game/core/powers';
+import { BREATH, SWIM, WET, waterAt } from '../game/core/water';
+import { hunterCues } from '../game/core/hunters';
+import { kitFor } from '../kits';
 import { CARRY } from '../game/core/lights';
 import { secretAtSeal } from '../game/core/secrets';
 import { heartbeatPeriod, type HapticSequencer } from '../ui/hapticPatterns';
@@ -57,6 +61,8 @@ export function createSoundDirector(engine: AudioEngine, haptics: HapticSequence
   let overlay = false;
   let huntDuckAt = 0;
   let roomKey = '';
+  let jade = false;
+  let breathAt = 0;
 
   /** starts, retunes or stops one continuous loop; a parameter is sent only when it moved enough */
   const loopTo = (key: string, id: SoundId | null, p: LoopParams & { bus?: Bus; ramp?: number }) => {
@@ -119,7 +125,7 @@ export function createSoundDirector(engine: AudioEngine, haptics: HapticSequence
   };
 
   const handleEvent = (s: GameState, e: GameEvent) => {
-    const f = FEEDBACK[e.type];
+    const f = kitFor(s.pyramid.id).feedback?.[e.type] ?? FEEDBACK[e.type];
     if (!f) return;
     if (f.sound) {
       const base = typeof f.sound === 'function' ? f.sound(e, s) : f.sound;
@@ -137,13 +143,22 @@ export function createSoundDirector(engine: AudioEngine, haptics: HapticSequence
   const footstep = (s: GameState) => {
     const sand = sandLevel(s, s.pos);
     const kind = s.floor.room[s.pos] >= 0 ? s.floor.rooms[s.floor.room[s.pos]].kind : 'passage';
-    const base = sand >= COVER ? 'step.sand' : sand > 0.05 ? 'step.grit' : kind === 'burial' || kind === 'antechamber' ? 'step.granite' : 'step.stone';
+    const lv = waterAt(s, s.pos);
+    const base = lv >= SWIM ? 'water.swim' : lv >= WET ? 'water.wade' : sand >= COVER ? 'step.sand' : sand > 0.05 ? 'step.grit' : kind === 'burial' || kind === 'antechamber' ? 'step.granite' : 'step.stone';
     const quiet = prevIdle >= QUIET_GAP;
     playAt(base, null, { bus: 'world', gain: quiet ? DB(-8) : 1, priority: 1, send: 0.2 });
     // the first wading step after dry ground
     const wet = sand >= COVER;
     if (wet && !wading) haptics.play('stepSand');
     wading = wet;
+  };
+
+  /** the world and guardian buses: silent under an overlay, 10 dB down (and muffled) while the Jade Seal holds */
+  const applyWorld = (ramp: number) => {
+    const level = overlay ? 0 : jade ? DB(-10) : 1;
+    engine.setBusLevel('world', level, ramp);
+    engine.setBusLevel('guardian', level, ramp);
+    engine.setBusFilter('world', jade && !overlay ? 1200 : 0, ramp);
   };
 
   const continuous = (s: GameState) => {
@@ -204,14 +219,16 @@ export function createSoundDirector(engine: AudioEngine, haptics: HapticSequence
     } else loopTo('draught', null, {});
 
     // the guardian: a low dread by proximity, a heartbeat in the hand, the tomb going quiet when it hunts in view
-    const cue = s.guardian ? guardianCue(s) : null;
-    if (cue && cue.mode !== 'dormant' && cue.path >= 0) {
+    // the nearest hunter drives the dread and the heartbeat; a frozen one is silent
+    let cue: ReturnType<typeof hunterCues>[number] | null = null;
+    for (const c of hunterCues(s)) if (!c.frozen && c.mode !== 'dormant' && c.path >= 0 && (!cue || c.path < cue.path)) cue = c;
+    if (cue) {
       const hunting = cue.mode === 'hunt';
       const g = smoothstep(16, 3, cue.path) * (hunting ? 1 : 0.5);
       const e = Math.hypot(cue.dx, cue.dy);
       loopTo('dread', g > 0.02 ? 'g.dread' : null, { bus: 'guardian', gain: g, pan: Math.max(-1, Math.min(1, cue.dx / Math.max(3, e))) * 0.8, lowpass: cue.visible ? 0 : 900, send: 0.25 });
       haptics.heartbeat(!cue.visible && cue.path <= 8 && cue.mode !== 'recoil' ? heartbeatPeriod(cue.path) : null);
-      if (hunting && cue.visible && s.light[s.guardian!.pos] > 0) {
+      if (hunting && cue.visible && s.guardian && cue.id === 'guardian' && s.light[s.guardian.pos] > 0) {
         huntDuckAt -= CONTINUOUS_EVERY;
         if (huntDuckAt <= 0) {
           engine.duck('ambience', -6, 0.3, 0.6, 0.8);
@@ -244,6 +261,20 @@ export function createSoundDirector(engine: AudioEngine, haptics: HapticSequence
       if (s.trail > lastTrail) footstep(s);
       lastTrail = s.trail;
       prevIdle = s.idle;
+      // the Jade Seal: the world goes quiet and dull while time is held, and comes back over 0.4 s
+      const held = s.powers.length > 0 && isFrozen(s);
+      if (held !== jade) {
+        jade = held;
+        applyWorld(held ? 0.2 : 0.4);
+      }
+      // the thumps repeat every 0.9 s while the breath is low
+      if (s.water && s.breath < BREATH.low && s.status === 'playing') {
+        breathAt -= dt;
+        if (breathAt <= 0) {
+          breathAt = 0.9;
+          haptics.play('breathLow');
+        }
+      } else breathAt = 0.9;
       acc += dt;
       if (acc >= CONTINUOUS_EVERY) {
         acc = 0;
@@ -262,13 +293,16 @@ export function createSoundDirector(engine: AudioEngine, haptics: HapticSequence
       huntDuckAt = 0;
       roomKey = '';
       if (s) floor = s.floor;
+      if (jade) {
+        jade = false;
+        applyWorld(0.2);
+      }
     },
 
     setOverlay(on) {
       if (on === overlay) return;
       overlay = on;
-      engine.setBusLevel('world', on ? 0 : 1, 0.25);
-      engine.setBusLevel('guardian', on ? 0 : 1, 0.25);
+      applyWorld(0.25);
       engine.setBusLevel('ambience', on ? DB(-10) : 1, 0.4);
     },
 

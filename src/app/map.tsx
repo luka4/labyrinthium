@@ -1,89 +1,181 @@
 import { router, useLocalSearchParams } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ScrollView, StyleSheet, Text, View, type ScrollViewInstance } from 'react-native';
 
+import { POWERS } from '../game/core/powers';
 import { PYRAMIDS, SEALS, isPyramidId, type PyramidId } from '../game/core/pyramids';
-import { drawWorldMap, mapLayout } from '../game/render/drawWorldMap';
-import { isUnlocked, sealsFilled, useProgress } from '../state/progress';
+import { SITE_ORDER } from '../game/world/geo';
+import { Globe } from '../screens/map/Globe';
+import { SiteCard, type CardData } from '../screens/map/SiteCard';
+import { isUnlocked, ownedPowers, pyramidStars, sealsFilled, useProgress } from '../state/progress';
 import { useReducedMotion } from '../state/settings';
-import { ArtCanvas, useTicker } from '../ui/ArtCanvas';
-import { Button, IconButton } from '../ui/Button';
+import { useTicker } from '../ui/ArtCanvas';
 import { uiSound } from '../audio/ui';
+import { Button, IconButton } from '../ui/Button';
 import { haptic } from '../ui/haptics';
 import { Panel, PanelActions, PanelText } from '../ui/Panel';
 import { Screen, TopBar } from '../ui/Screen';
-import { colors, fonts, space, type } from '../ui/theme';
+import { colors, fonts, space } from '../ui/theme';
 
-const FILL_MS = 1600;
+/** The seal animation (plan 06): a hold on the pyramid, the spark along the arc, the socket, then the door. */
+const HOLD_MS = 400;
+const TRAVEL_MS = 1600;
+const SOCKET_MS = 600;
 const UNLOCK_DELAY_MS = 300;
 const UNLOCK_MS = 1800;
+const GAP = 12;
 
-/** The world map: pick a pyramid. The Black Pyramid stays sealed until all four artifacts are home. */
+type Anim = { id: PyramidId | null; t0: number };
+
+/**
+ * The world map: a globe you can turn, and a pager of five site cards (west to east, the Black Pyramid
+ * last) under it. Choosing on one turns the other. The Black Pyramid stays sealed until all four artifacts are home.
+ */
 export default function MapScreen() {
   const params = useLocalSearchParams<{ filled?: string }>();
-  const progress = useProgress();
-  const { artifacts, camp, deepest, blackUnlockSeen } = progress;
+  const artifacts = useProgress((s) => s.artifacts);
+  const camp = useProgress((s) => s.camp);
+  const deepest = useProgress((s) => s.deepest);
+  const floors = useProgress((s) => s.floors);
+  const blackUnlockSeen = useProgress((s) => s.blackUnlockSeen);
+  const focus = useProgress((s) => s.focus);
   const reduced = useReducedMotion();
   const time = useTicker(30);
-  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [layout, setLayout] = useState({ width: 0, height: 0 });
   const [sealedOpen, setSealedOpen] = useState(false);
+  const [selected, setSelected] = useState<PyramidId>(focus ?? 'egypt');
+  const pager = useRef<ScrollViewInstance>(null);
 
-  // The map may already be mounted under other screens, so each animation is
-  // timed from the moment it starts, not from mount.
-  // A seal filling in: once, on arrival from a basement (?filled=<id>).
-  const [filling, setFilling] = useState<{ id: PyramidId; t0: number } | null>(null);
-  useEffect(() => {
-    const id = params.filled;
-    if (!isPyramidId(id) || id === 'black' || !artifacts[id]) return;
-    if (!reduced) setFilling({ id, t0: time });
-    router.setParams({ filled: undefined });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.filled]);
-  const fill = filling ? Math.min(1, (time - filling.t0) / FILL_MS) : 1;
-
-  // The door opening: once, after the fourth seal is filled.
   const allSeals = sealsFilled(artifacts) === SEALS.length;
-  const [unlockT0, setUnlockT0] = useState<number | null>(null);
-  const unlockPending = allSeals && !blackUnlockSeen && !reduced;
-  useEffect(() => {
-    if (unlockPending && unlockT0 === null && fill >= 1) setUnlockT0(time + UNLOCK_DELAY_MS);
-  }, [unlockPending, unlockT0, fill, time]);
-  const unlock = !allSeals
-    ? 0
-    : !unlockPending
-      ? 1
-      : unlockT0 === null
-        ? 0
-        : Math.min(1, Math.max(0, (time - unlockT0) / UNLOCK_MS));
+  const owned = useMemo(() => ownedPowers(artifacts), [artifacts]);
 
-  const fillFelt = useRef(false);
-  const doorFelt = useRef(false);
+  // ---- the seal animation: once, on arrival from a basement (?filled=<id>), or the door alone ------------------
+  const [anim, setAnim] = useState<Anim | null>(null);
+  const started = useRef(false);
   useEffect(() => {
-    if (filling && fill >= 1 && !fillFelt.current) {
-      fillFelt.current = true;
+    if (started.current) return;
+    const id = params.filled;
+    if (isPyramidId(id) && id !== 'black' && artifacts[id] && !reduced) {
+      started.current = true;
+      setAnim({ id, t0: time });
+      router.setParams({ filled: undefined });
+    } else if (allSeals && !blackUnlockSeen && !reduced) {
+      started.current = true;
+      setAnim({ id: null, t0: time });
+    } else if (isPyramidId(id)) {
+      // reduced motion: the final state at once, one sound
+      started.current = true;
+      router.setParams({ filled: undefined });
+      if (artifacts[id]) {
+        uiSound.seal();
+        setSelected('black');
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.filled, allSeals, blackUnlockSeen, reduced]);
+
+  const elapsed = anim ? time - anim.t0 : 0;
+  const hasFill = !!anim?.id;
+  const travelStart = HOLD_MS;
+  const socketStart = travelStart + TRAVEL_MS;
+  const afterFill = hasFill ? socketStart + SOCKET_MS : 0;
+  const unlockStart = afterFill + (allSeals && !blackUnlockSeen ? UNLOCK_DELAY_MS : 0);
+  const needsUnlock = !!anim && allSeals && !blackUnlockSeen;
+  const unlockU = !anim ? (allSeals ? 1 : 0) : needsUnlock ? Math.min(1, Math.max(0, (elapsed - unlockStart) / UNLOCK_MS)) : allSeals ? 1 : 0;
+  const animEnd = needsUnlock ? unlockStart + UNLOCK_MS : afterFill;
+  const travelU = anim && hasFill ? Math.min(1, Math.max(0, (elapsed - travelStart) / TRAVEL_MS)) : 1;
+  const socketT = anim && hasFill ? Math.min(1, Math.max(0, (elapsed - socketStart) / SOCKET_MS)) : 1;
+  const animating = !!anim && elapsed < animEnd;
+
+  // the pager follows the spark to the Black card, once
+  const scrolled = useRef(false);
+  useEffect(() => {
+    if (anim?.id && elapsed >= travelStart && !scrolled.current) {
+      scrolled.current = true;
+      setSelected('black');
+      scrollTo('black', true);
+    }
+  });
+  useEffect(() => {
+    if (anim && !animating && elapsed > 0) setAnim(null);
+  }, [anim, animating, elapsed]);
+
+  // sounds and haptics at the beats
+  const felt = useRef({ fill: false, door: false });
+  useEffect(() => {
+    if (anim?.id && socketT > 0 && !felt.current.fill) {
+      felt.current.fill = true;
       uiSound.seal();
       haptic.bump();
     }
-    if (unlockPending && unlock > 0.6 && !doorFelt.current) {
-      doorFelt.current = true;
+    if (needsUnlock && unlockU > 0.3 && !felt.current.door) {
+      felt.current.door = true;
       uiSound.seal();
       haptic.heavy();
     }
-    if (allSeals && !blackUnlockSeen && unlock >= 1) useProgress.getState().markBlackUnlockSeen();
-  }, [fill, unlock, allSeals, blackUnlockSeen, unlockPending, filling]);
+    if (anim && needsUnlock && unlockU >= 1) useProgress.getState().markBlackUnlockSeen();
+  }, [anim, socketT, unlockU, needsUnlock]);
 
-  const L = mapLayout(size.width, size.height);
+  // ---- layout ---------------------------------------------------------------------------------------------------
+  const cardW = Math.max(220, layout.width - 24);
+  const globeSize = Math.max(180, Math.min(layout.width, Math.round(layout.height * 0.52)));
+  const idx = (id: PyramidId) => SITE_ORDER.indexOf(id);
+  function scrollTo(id: PyramidId, animated: boolean) {
+    pager.current?.scrollTo({ x: idx(id) * (cardW + GAP), animated: animated && !reduced });
+  }
+  const select = useCallback((id: PyramidId, fromPager = false) => {
+    setSelected(id);
+    useProgress.getState().setFocus(id);
+    if (!fromPager) scrollTo(id, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cardW, reduced]);
+
+  // restore the remembered card once the width is known
+  const restored = useRef(false);
+  useEffect(() => {
+    if (layout.width > 0 && !restored.current) {
+      restored.current = true;
+      scrollTo(selected, false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout.width]);
+
+  // ---- cards ----------------------------------------------------------------------------------------------------
   const filled = sealsFilled(artifacts);
-  const animating = fill < 1 || (allSeals && unlock < 1);
-
-  const statusOf = (id: PyramidId): { text: string; done: boolean } => {
+  const cardOf = (id: PyramidId): CardData => {
     const p = PYRAMIDS[id];
-    if (artifacts[id]) return { text: `${p.artifact} ✓`, done: true };
-    if (id === 'black') return isUnlocked('black', artifacts) ? { text: 'Open', done: false } : { text: `Sealed · ${filled} of 4`, done: false };
-    if ((camp[id] ?? 0) > 0) return { text: `Camp · floor ${(camp[id] ?? 0) + 1}`, done: false };
-    if (deepest[id] !== undefined) return { text: `Reached floor ${(deepest[id] ?? 0) + 1}`, done: false };
-    return { text: `${p.floorCount} floors`, done: false };
+    let status = `${p.floorCount} floors`;
+    let done = false;
+    if (artifacts[id]) {
+      status = `${p.artifact} ✓`;
+      done = true;
+    } else if (id === 'black') status = isUnlocked('black', artifacts) ? 'Open' : `Sealed · ${filled} of 4`;
+    else if ((camp[id] ?? 0) > 0) status = `Camp · floor ${(camp[id] ?? 0) + 1}`;
+    else if (deepest[id] !== undefined) status = `Reached floor ${(deepest[id] ?? 0) + 1}`;
+    return {
+      id,
+      status,
+      done,
+      taken: !!artifacts[id],
+      stars: pyramidStars(floors, id),
+      camp: (camp[id] ?? 0) > 0 ? (camp[id] ?? 0) : null,
+      attuned: owned.find((pw) => POWERS[pw].attuned === id) ?? null,
+      sealed: id === 'black' && !isUnlocked('black', artifacts),
+      filled,
+    };
   };
+
+  // what the door and the globe show while the animation runs: the socket of the filling pyramid is empty until its beat
+  const shownCollected = useMemo(() => {
+    if (!anim?.id || socketT > 0) return artifacts;
+    const c = { ...artifacts };
+    delete c[anim.id];
+    return c;
+  }, [artifacts, anim?.id, socketT]);
+  const filling = anim?.id ? { id: anim.id, t: travelU } : null;
+  const follow = anim?.id && travelU < 1 ? { from: anim.id, to: 'black' as const, t: elapsed < travelStart ? 0 : travelU } : null;
+  const doorFilling = anim?.id && socketT > 0 && socketT < 1 ? { id: anim.id, t: socketT } : null;
+  const door = { collected: shownCollected, unlock: unlockU, filling: doorFilling, time: reduced ? 0 : time / 1000 };
 
   const open = (id: PyramidId) => {
     if (animating) return;
@@ -94,14 +186,10 @@ export default function MapScreen() {
     }
     router.push({ pathname: '/pyramid/[id]', params: { id } });
   };
-
-  const hint = progress.artifacts.black
-    ? "The Builder's Heart is yours. Below the Black Pyramid, something has been waiting."
-    : allSeals
-      ? 'All four seals are filled. The Black Pyramid is open.'
-      : filled === 0
-        ? 'Choose any pyramid. Each starts on its top floor and keeps a sacred artifact in its basement.'
-        : `${filled} of 4 seals on the Black Pyramid's door are filled.`;
+  const resume = (id: PyramidId) => {
+    if (animating) return;
+    router.push({ pathname: '/play/[id]', params: { id, from: 'camp' } });
+  };
 
   return (
     <Screen>
@@ -110,55 +198,57 @@ export default function MapScreen() {
         onBack={() => (router.canGoBack() ? router.back() : router.replace('/'))}
         right={<IconButton glyph="⚙" label="Settings" onPress={() => router.push('/settings')} />}
       />
-      <View style={styles.map} onLayout={(e) => setSize(e.nativeEvent.layout)}>
-        {size.width > 0 && (
+      <View style={styles.body} onLayout={(e) => setLayout(e.nativeEvent.layout)}>
+        {layout.width > 0 && (
           <>
-            <ArtCanvas
-              width={size.width}
-              height={size.height}
-              deps={[time, artifacts, filling?.id, fill, unlock]}
-              draw={(c, w, h) => drawWorldMap(c, w, h, { collected: artifacts, filling: filling?.id, fill, unlock, time: reduced ? 0 : time })}
-              style={StyleSheet.absoluteFill}
-            />
-            {(Object.keys(PYRAMIDS) as PyramidId[]).map((id) => {
-              const s = L.site(id);
-              const status = statusOf(id);
-              const below = id === 'black' ? L.sealSize * 2 : 6;
-              const boxW = Math.max(s.size * 1.3, 120);
-              return (
-                <Pressable
+            <View style={{ alignItems: 'center', height: globeSize }}>
+              <Globe
+                size={globeSize}
+                selected={selected}
+                collected={shownCollected}
+                filling={filling}
+                follow={follow}
+                unlock={unlockU}
+                reducedMotion={reduced}
+                onSelect={(id) => !animating && select(id)}
+              />
+            </View>
+            <ScrollView
+              ref={pager}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              snapToInterval={cardW + GAP}
+              decelerationRate="fast"
+              scrollEnabled={!animating}
+              contentContainerStyle={{ gap: GAP, paddingRight: layout.width - cardW }}
+              onMomentumScrollEnd={(e) => {
+                const i = Math.max(0, Math.min(SITE_ORDER.length - 1, Math.round(e.nativeEvent.contentOffset.x / (cardW + GAP))));
+                if (SITE_ORDER[i] !== selected) select(SITE_ORDER[i], true);
+              }}
+              style={styles.pager}
+            >
+              {SITE_ORDER.map((id) => (
+                <SiteCard
                   key={id}
-                  accessibilityRole="button"
-                  accessibilityLabel={`${PYRAMIDS[id].name}. ${status.text}`}
-                  onPress={() => open(id)}
-                  style={({ pressed }) => [
-                    styles.site,
-                    { left: s.x - boxW / 2, top: s.y - s.size * 1.05, width: boxW, paddingTop: s.size * 1.05 + below },
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text style={[styles.name, id === 'black' && styles.nameBig]} numberOfLines={1}>
-                    {PYRAMIDS[id].name}
-                  </Text>
-                  <Text style={[styles.status, status.done && styles.statusDone]} numberOfLines={1}>
-                    {status.text}
-                  </Text>
-                </Pressable>
-              );
-            })}
+                  card={cardOf(id)}
+                  width={cardW}
+                  door={id === 'black' ? door : undefined}
+                  onEnter={() => open(id)}
+                  onContinue={() => resume(id)}
+                  onDoor={() => setSealedOpen(true)}
+                />
+              ))}
+            </ScrollView>
           </>
         )}
       </View>
-      <Text style={[type.caption, styles.hint]}>{hint}</Text>
 
       {sealedOpen && (
         <Panel eyebrow={`Sealed · ${filled} of 4`} title="The Black Pyramid" onDismiss={() => setSealedOpen(false)}>
-          <PanelText>
-            Its door has four empty seals. Each is filled by the artifact kept in the basement of one pyramid.
-          </PanelText>
+          <PanelText>Its door has four empty sockets. Each is filled by the artifact kept in the basement of one pyramid.</PanelText>
           <View style={styles.sealList}>
             {SEALS.map((id) => (
-              <Text key={id} style={[styles.sealRow, artifacts[id] && styles.statusDone]}>
+              <Text key={id} style={[styles.sealRow, artifacts[id] && { color: colors.gold }]}>
                 {artifacts[id] ? '◆' : '◇'}  {PYRAMIDS[id].artifact} · {PYRAMIDS[id].name}
               </Text>
             ))}
@@ -173,14 +263,9 @@ export default function MapScreen() {
 }
 
 const styles = StyleSheet.create({
-  map: { flex: 1, marginHorizontal: -space.lg, marginVertical: space.sm },
-  site: { position: 'absolute', alignItems: 'center', borderRadius: 12, paddingBottom: space.sm },
-  pressed: { backgroundColor: 'rgba(243,197,90,0.08)' },
-  name: { color: colors.ink, fontFamily: fonts.bodySemi, fontSize: 15 },
-  nameBig: { fontFamily: fonts.display, fontSize: 17 },
-  status: { color: colors.dim, fontFamily: fonts.body, fontSize: 12, marginTop: 2 },
-  statusDone: { color: colors.gold },
-  hint: { textAlign: 'center', paddingHorizontal: space.md },
+  body: { flex: 1, marginHorizontal: -space.lg, marginTop: space.sm, gap: space.md },
+  pager: { flexGrow: 0, paddingLeft: space.md },
   sealList: { gap: space.xs },
   sealRow: { color: colors.muted, fontFamily: fonts.body, fontSize: 15 },
 });
+

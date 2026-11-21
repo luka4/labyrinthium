@@ -1,5 +1,6 @@
 import { lastCamp } from '../game/core/game';
-import { PYRAMIDS, isPyramidId, type PyramidId } from '../game/core/pyramids';
+import { POWER_ORDER, type PowerId } from '../game/core/powers';
+import { POWER_INFO, PYRAMIDS, isPyramidId, type PyramidId } from '../game/core/pyramids';
 import { STAR } from '../game/core/stars';
 
 /**
@@ -7,7 +8,8 @@ import { STAR } from '../game/core/stars';
  * scripts/check-stars.ts can test v1-v4 saves against it.
  */
 /** One-time teaching captions (plan 03): shown the first time a trap kind is lit; `secret` (plan 05) the first time a seal is seen. */
-export type HintId = 'plate' | 'block' | 'portcullis' | 'sandfall' | 'trapdoor' | 'collapse' | 'guardian' | 'guardianWake' | 'escape' | 'secret';
+/** Culture hints are namespaced ('maya:wheel'); the common ones are `power`, `water`, `flooded`. */
+export type HintId = string;
 
 /** What one pyramid's escapes add up to (plan 04): the count, the fastest, and how many were clean. */
 export type EscapeRecord = {
@@ -42,9 +44,13 @@ export type ProgressData = {
   records: Partial<Record<PyramidId, EscapeRecord>>;
   /** stars, best times and secrets per floor (plan 05); key = 0-based floor index */
   floors: Partial<Record<PyramidId, Record<number, FloorRecord>>>;
+  /** the data revision each pyramid's floors were played at (plan 06) */
+  revs: Partial<Record<PyramidId, number>>;
+  /** the map card shown last */
+  focus: PyramidId | null;
 };
 
-export const PROGRESS_VERSION = 5;
+export const PROGRESS_VERSION = 6;
 
 export const EMPTY: ProgressData = {
   artifacts: {},
@@ -56,6 +62,8 @@ export const EMPTY: ProgressData = {
   hints: {},
   records: {},
   floors: {},
+  revs: {},
+  focus: null,
 };
 
 const clampDeepest = (data: Partial<ProgressData>) => {
@@ -105,5 +113,41 @@ export function migrateProgress(persisted: unknown, version: number): ProgressDa
     }
     data.floors = floors;
   }
+  if (version < 6) {
+    // v6: every pyramid is at its current data revision (nothing is cleared), no map focus yet
+    const revs: ProgressData['revs'] = {};
+    for (const id of Object.keys(PYRAMIDS) as PyramidId[]) revs[id] = PYRAMIDS[id].rev;
+    data.revs = revs;
+    data.focus = null;
+  }
   return { ...EMPTY, ...data };
+}
+
+/**
+ * A pyramid whose floors were rebuilt (07-09 bump its `rev`) loses only what points at the old floors:
+ * its camp, deepest floor and floor records. Artifact, records and completions stay. Runs on every load,
+ * pure and idempotent; a pyramid with no stored revision is left alone and stamped.
+ */
+export function reconcileRevisions(data: ProgressData, revOf: (id: PyramidId) => number): ProgressData {
+  const revs: ProgressData['revs'] = { ...(data.revs ?? {}) };
+  let { camp, deepest, floors } = data;
+  for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
+    const want = revOf(id);
+    const have = revs[id];
+    if (have !== undefined && have !== want) {
+      camp = { ...camp };
+      deepest = { ...deepest };
+      floors = { ...floors };
+      delete camp[id];
+      delete deepest[id];
+      delete floors[id];
+    }
+    revs[id] = want;
+  }
+  return { ...data, camp, deepest, floors, revs };
+}
+
+/** The artifact powers you carry, in POWER_ORDER: each taken artifact gives its power. */
+export function ownedPowers(artifacts: ProgressData['artifacts']): PowerId[] {
+  return POWER_ORDER.filter((id) => artifacts[POWER_INFO[id].artifact as PyramidId]);
 }

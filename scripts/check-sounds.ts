@@ -43,7 +43,7 @@ function decode(file: string, channels: number): Float32Array[] {
 }
 
 let totalBytes = 0;
-const mem = { core: 0, game: 0, 'bed:egypt': 0, 'bed:exterior': 0 } as Record<string, number>;
+const mem = { core: 0, game: 0, 'bed:egypt': 0, 'bed:exterior': 0, powers: 0, water: 0 } as Record<string, number>;
 const t0 = performance.now();
 for (const recipe of RECIPES) {
   const id = recipe.id;
@@ -108,7 +108,9 @@ if (mb > 2.5) fail(`total size ${mb.toFixed(2)} MB over the 2.5 MB cap`);
 else if (mb > 2.0) warn(`total size ${mb.toFixed(2)} MB over 2.0 MB`);
 const MB = (n: number) => (n / 1048576).toFixed(1);
 const run = mem.core + mem.game + mem['bed:egypt'];
-console.log(`decoded at 48 kHz float: core ${MB(mem.core)} MB, game ${MB(mem.game)} MB, egypt bed ${MB(mem['bed:egypt'])} MB, exterior ${MB(mem['bed:exterior'])} MB; in a run ${MB(run)} MB (cap 32)`);
+const worst = run + mem.powers + mem.water;
+console.log(`decoded at 48 kHz float: core ${MB(mem.core)} MB, game ${MB(mem.game)} MB, egypt bed ${MB(mem['bed:egypt'])} MB, exterior ${MB(mem['bed:exterior'])} MB, powers ${MB(mem.powers)} MB, water ${MB(mem.water)} MB; in a run ${MB(run)} MB (cap 32), with powers and water ${MB(worst)} MB (cap 36)`);
 if (run > 32 * 1048576) fail(`decoded audio of a run ${MB(run)} MB over the 32 MB cap`);
+if (worst > 36 * 1048576) fail(`decoded audio of a run with powers and water ${MB(worst)} MB over the 36 MB cap`);
 console.log(failures ? `${failures} failure(s), ${warnings} warning(s)` : `ok, ${warnings} warning(s)`);
 process.exit(failures ? 1 : 0);

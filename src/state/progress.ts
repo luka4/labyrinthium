@@ -4,7 +4,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 
 import { PYRAMIDS, SEALS, type PyramidId } from '../game/core/pyramids';
 import { STAR, starCount, type FloorResult } from '../game/core/stars';
-import { EMPTY, PROGRESS_VERSION, migrateProgress, type FloorRecord, type HintId, type ProgressData } from './migrateProgress';
+import { EMPTY, PROGRESS_VERSION, migrateProgress, ownedPowers, reconcileRevisions, type FloorRecord, type HintId, type ProgressData } from './migrateProgress';
 
 export type { EscapeRecord, FloorRecord, HintId, ProgressData } from './migrateProgress';
 
@@ -30,6 +30,8 @@ type ProgressActions = {
   markSecret: (id: PyramidId, floorIndex: number, k: number, secrets: number) => void;
   /** a floor was left: ORs the star bits, keeps the best time and the secrets found */
   recordFloor: (id: PyramidId, r: FloorResult) => void;
+  /** the map card shown last */
+  setFocus: (id: PyramidId) => void;
   markBlackUnlockSeen: () => void;
   markEndingSeen: () => void;
   markHint: (id: HintId) => void;
@@ -104,6 +106,7 @@ export const useProgress = create<ProgressData & ProgressActions>()(
             n: r.total,
           })),
         ),
+      setFocus: (id) => set((s) => (s.focus === id ? s : { focus: id })),
       markBlackUnlockSeen: () => set({ blackUnlockSeen: true }),
       markEndingSeen: () => set({ endingSeen: true }),
       markHint: (id) => set((s) => (s.hints[id] ? s : { hints: { ...s.hints, [id]: true } })),
@@ -119,8 +122,10 @@ export const useProgress = create<ProgressData & ProgressActions>()(
       name: 'labyrinthium.progress',
       version: PROGRESS_VERSION,
       migrate: (persisted, version) => migrateProgress(persisted, version),
+      // after migrate, on every load: a pyramid rebuilt by a later task resets only its own floors
+      merge: (persisted, current) => ({ ...current, ...reconcileRevisions({ ...EMPTY, ...((persisted ?? {}) as Partial<ProgressData>) }, (id) => PYRAMIDS[id].rev) }),
       storage: createJSONStorage(() => AsyncStorage),
-      partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen, hints, records, floors }) => ({
+      partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen, hints, records, floors, revs, focus }) => ({
         artifacts,
         camp,
         deepest,
@@ -130,6 +135,8 @@ export const useProgress = create<ProgressData & ProgressActions>()(
         hints,
         records,
         floors,
+        revs,
+        focus,
       }),
     },
   ),
@@ -164,3 +171,5 @@ export function fragmentsRead(floors: ProgressData['floors'], id: PyramidId, fra
   }
   return out.sort((a, b) => a - b);
 }
+
+export { ownedPowers };

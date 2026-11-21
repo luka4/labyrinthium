@@ -4,6 +4,7 @@ import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 
 import { MEDALLION, SLOT, STRIP_H, slotX, slotY } from '../../game/render/drawLightHud';
 import { colors, fonts } from '../../ui/theme';
+import type { PowerText } from './PowerBar';
 
 /** What the strip says; computed at most 4 times a second from the game state. */
 export type HudText = {
@@ -13,6 +14,10 @@ export type HudText = {
   low: boolean;
   spares: Array<{ label: string }>;
   caption: { id: number; text: string } | null;
+  /** accessibility: seconds of breath left while it matters */
+  breath?: string;
+  /** the power bar's labels (PowerBar.tsx) */
+  powers?: PowerText;
 };
 
 /**
@@ -27,7 +32,7 @@ export const LightHud = memo(function LightHud({ hud, width, onSwap }: { hud: Hu
       <View
         style={{ position: 'absolute', left: 8, top: (STRIP_H - MEDALLION) / 2, width: MEDALLION, height: MEDALLION }}
         accessible
-        accessibilityLabel={`${hud.name}, ${hud.time}${hud.spares.length ? `, ${hud.spares.length} spare` : ', no spares'}`}
+        accessibilityLabel={`${hud.name}, ${hud.time}${hud.spares.length ? `, ${hud.spares.length} spare` : ', no spares'}${hud.breath ? `, ${hud.breath}` : ''}`}
       />
       <View style={{ position: 'absolute', left, top: 12, width: textWidth }} pointerEvents="none">
         <Text style={styles.name} numberOfLines={1}>

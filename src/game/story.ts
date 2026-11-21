@@ -44,6 +44,4 @@ export const STORY: Partial<Record<PyramidId, readonly StoryFragment[]>> = {
   ],
 };
 
-export function storyOf(id: PyramidId): readonly StoryFragment[] {
-  return STORY[id] ?? [];
-}
+/** The story of a pyramid is read through its kit: `storyOf` in `src/kits`. */

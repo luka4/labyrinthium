@@ -20,6 +20,7 @@ const silent: AudioEngine = {
   loop: () => null,
   duck: () => {},
   setBusLevel: () => {},
+  setBusFilter: () => {},
   setVolumes: () => {},
   setRoom: () => {},
   suspend: async () => {},

@@ -3,6 +3,7 @@ import type { Direction, Pyramid } from './game';
 import type { GuardianRow } from './egypt';
 import type { FixtureKind, ItemKind } from './lights';
 import type { Secret } from './secrets';
+import type { FloorExt } from './plugins';
 
 /**
  * A floor is a square tile grid built from an architectural plan (see generate.ts):
@@ -172,6 +173,10 @@ export type Floor = {
   guardian: GuardianPlan | null;
   /** sealed chambers (secrets.ts); the chamber tiles stay ROCK here and open only in a run's grid */
   secrets: Secret[];
+  /** static initial water levels 0..255 (water.ts), written by rule plug-ins; null on dry floors (all of Egypt) */
+  water: Uint8Array | null;
+  /** static per-floor data of rule plug-ins, by plug-in id; `{}` on Egypt */
+  ext: Partial<FloorExt>;
 };
 
 /**
@@ -179,7 +184,7 @@ export type Floor = {
  * Floor i+1's arrival needs floor i's stairs and trapdoors on floor i need floor i+1's layout, so
  * layouts are generated first (generate.ts `layoutFor`) and features are added per floor played.
  */
-export type Layout = Omit<Floor, 'items' | 'fixtures' | 'traps' | 'trapAt' | 'eligiblePorts' | 'collapse' | 'exit' | 'exitFront' | 'guardian' | 'secrets'> & {
+export type Layout = Omit<Floor, 'items' | 'fixtures' | 'traps' | 'trapAt' | 'eligiblePorts' | 'collapse' | 'exit' | 'exitFront' | 'guardian' | 'secrets' | 'water' | 'ext'> & {
   braziers: Fixture[];
   arrivalRoom: number;
   stairsRoom: number;

@@ -21,15 +21,19 @@ const KEYS: Record<string, Direction> = {
 
 /**
  * Web keyboard: arrows or WASD (hold to keep walking, the last key pressed wins),
- * Shift + direction runs, Escape or P pauses. Listeners live on `window`.
+ * Shift + direction runs, Escape or P pauses, 1-4 use the powers in bar order. Listeners live on `window`.
  */
-export function useKeyboard(walker: Walker, enabled: boolean, onPause: () => void) {
+export function useKeyboard(walker: Walker, enabled: boolean, onPause: () => void, onPower?: (slot: number) => void) {
   useEffect(() => {
     if (Platform.OS !== 'web' || !enabled || typeof window === 'undefined') return;
     const stack: Direction[] = [];
     const down = (e: KeyboardEvent) => {
       if (e.key === 'Escape' || e.key === 'p' || e.key === 'P') {
         if (!e.repeat) onPause();
+        return;
+      }
+      if (onPower && e.key >= '1' && e.key <= '4') {
+        if (!e.repeat) onPower(Number(e.key) - 1);
         return;
       }
       const dir = KEYS[e.key];
@@ -63,5 +67,5 @@ export function useKeyboard(walker: Walker, enabled: boolean, onPause: () => voi
       window.removeEventListener('blur', blur);
       walker.reset();
     };
-  }, [walker, enabled, onPause]);
+  }, [walker, enabled, onPause, onPower]);
 }
