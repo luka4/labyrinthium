@@ -6,11 +6,58 @@ import type { GameEvent, GameState } from './game';
  * can import them without importing each other in a cycle.
  */
 
-const EVENT_LOG = 8;
+const EVENT_LOG = 16;
 
-export function emit(s: GameState, type: GameEvent['type'], kind: GameEvent['kind']) {
-  s.events.push({ seq: ++s.eventSeq, type, kind });
+/** `at` is the tile the event happened on (sound and haptics read it), or -1. */
+export function emit(s: GameState, type: GameEvent['type'], kind: GameEvent['kind'], at = -1) {
+  s.events.push({ seq: ++s.eventSeq, type, kind, at });
   if (s.events.length > EVENT_LOG) s.events.shift();
+}
+
+const MAX_NOISES = 32;
+
+/**
+ * Something made a noise on tile `at` that carries `radius` path steps. The guardian listens in
+ * `tickGuardian`; the queue lives here so traps.ts never imports guardian.ts.
+ */
+export function noise(s: GameState, at: number, radius: number) {
+  const g = s.guardian;
+  if (!g || g.mode === 'arriving' || g.mode === 'gone' || s.noises.length >= MAX_NOISES * 2) return;
+  s.noises.push(at, radius);
+}
+
+/** A passage changed: the guardian's cached distance fields are stale. */
+export function invalidatePaths(s: GameState) {
+  const g = s.guardian;
+  if (!g) return;
+  g.distFrom = -1;
+  g.toTargetFor = -1;
+}
+
+/**
+ * The guardian is driven off (touching you, a block falling on it): it recoils for a few seconds
+ * towards the waypoint farthest from you.
+ */
+export function recoilGuardian(s: GameState, seconds: number) {
+  const g = s.guardian;
+  const plan = s.floor.guardian;
+  if (!g || !plan) return;
+  g.mode = 'recoil';
+  g.timer = seconds;
+  const { size } = s.floor;
+  const px = s.pos % size;
+  const py = (s.pos - px) / size;
+  let best = plan.lair;
+  let bestD = -1;
+  for (const w of plan.route) {
+    const d = Math.abs((w % size) - px) + Math.abs(Math.floor(w / size) - py);
+    if (d > bestD) {
+      bestD = d;
+      best = w;
+    }
+  }
+  g.target = best;
+  g.toTargetFor = -1;
 }
 
 export function setHand(s: GameState, hand: Carried) {

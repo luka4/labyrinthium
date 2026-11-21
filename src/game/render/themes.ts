@@ -33,6 +33,12 @@ export type FloorTheme = {
   /** trap plates: a darker stone set into the paving, and its lit edge */
   granite: string;
   graniteEdge: string;
+  /** the guardian (plan 04): resin-dark linen wrappings, their shadow and highlight, and the gilded cartonnage mask */
+  linen: string;
+  linenDark: string;
+  linenLight: string;
+  mask: string;
+  maskLight: string;
 };
 
 const ROYAL: ReadonlySet<RoomKind> = new Set<RoomKind>(['burial', 'antechamber', 'shrine', 'stairsDown']);
@@ -66,6 +72,11 @@ const EGYPT: FloorTheme = {
   sandDark: '#a88a52',
   granite: '#5f4b48',
   graniteEdge: '#a48c82',
+  linen: '#6b5a43',
+  linenDark: '#3a2c1e',
+  linenLight: '#a08a68',
+  mask: '#c49a3f',
+  maskLight: '#e8c66a',
 };
 
 function scale(hex: string, f: number): string {
@@ -107,6 +118,11 @@ function derived(base: string): FloorTheme {
     sandDark: scale(base, 0.7),
     granite: scale(base, 0.38),
     graniteEdge: scale(base, 0.8),
+    linen: '#6b5a43',
+    linenDark: '#3a2c1e',
+    linenLight: '#a08a68',
+    mask: '#c49a3f',
+    maskLight: '#e8c66a',
   };
 }
 

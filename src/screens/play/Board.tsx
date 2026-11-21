@@ -33,7 +33,7 @@ export const Board = memo(function Board(props: BoardProps) {
   const [picture, setPicture] = useState<SkPicture | null>(null);
   const latest = useRef(props);
   latest.current = props;
-  const anim = useRef({ floor: null as unknown, prevPos: 0, lastPos: 0, quakeSeq: 0, quakeAt: -10, fallAt: -1 });
+  const anim = useRef({ floor: null as unknown, prevPos: 0, lastPos: 0, quakeSeq: 0, quakeAt: -10, fallAt: -1, wisps: [] as Array<{ at: number; t0: number }> });
   const sand = useMemo(() => createSandRenderer(props.theme), [props.theme]);
   useEffect(() => () => sand.dispose(), [sand]);
 
@@ -48,6 +48,7 @@ export const Board = memo(function Board(props: BoardProps) {
         a.lastPos = s.pos;
         a.quakeSeq = s.eventSeq;
         a.fallAt = -1;
+        a.wisps = [];
       } else if (s.pos !== a.lastPos) {
         a.prevPos = a.lastPos;
         a.lastPos = s.pos;
@@ -55,7 +56,10 @@ export const Board = memo(function Board(props: BoardProps) {
       // the quake shakes the camera for 0.6 s; a fall takes 0.25 s
       for (const e of s.events) {
         if (e.seq > a.quakeSeq && e.type === 'quake') a.quakeAt = time;
+        // a flame the guardian put out: a wisp of smoke for 1.5 s
+        if (e.seq > a.quakeSeq && e.type === 'snuffed' && e.at >= 0) a.wisps.push({ at: e.at, t0: time });
       }
+      if (a.wisps.length) a.wisps = a.wisps.filter((w) => time - w.t0 < 1.6);
       a.quakeSeq = s.eventSeq;
       let shakeX = 0;
       let shakeY = 0;
@@ -71,7 +75,7 @@ export const Board = memo(function Board(props: BoardProps) {
       } else a.fallAt = -1;
       const fall = a.fallAt < 0 ? 0 : Math.min(1, (time - a.fallAt) / 0.25);
       const view: View = { camX: p.cam.current.x + shakeX, camY: p.cam.current.y + shakeY, board: p.boardSize, tilePx: p.tilePx };
-      const frame = { time, prevPos: a.prevPos, fall };
+      const frame = { time, prevPos: a.prevPos, fall, wisps: a.wisps };
       // rasterise the floor art the view needs (chunks), then prefetch within a small budget
       const win = viewWindow(view, s.floor.size, 1);
       p.art?.ensure(win, 6);

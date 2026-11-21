@@ -7,10 +7,17 @@ import { drawPyramidSide, sideLayout } from '../../game/render/drawPyramidSide';
 import { ArtCanvas, useTicker } from '../../ui/ArtCanvas';
 import { colors, fonts, space, type } from '../../ui/theme';
 
-export type OverviewKind = 'enter' | 'descend' | 'resume' | 'fall';
+export type OverviewKind = 'enter' | 'descend' | 'resume' | 'fall' | 'escape';
+
+const easeInOut = (t: number) => {
+  const q = Math.min(1, Math.max(0, t));
+  return q * q * (3 - 2 * q);
+};
 
 const SLIDE_MS = 650;
 const SHOW_MS = 2400;
+/** the climb up the escape shaft takes longer than a floor change */
+const ESCAPE_MS = 3200;
 
 /**
  * Between floors: the pyramid in profile, the torch sliding down one tier.
@@ -39,9 +46,9 @@ export function FloorOverview({
   const time = useTicker(30);
 
   useEffect(() => {
-    const id = setTimeout(onDone, SHOW_MS);
+    const id = setTimeout(onDone, kind === 'escape' ? ESCAPE_MS : SHOW_MS);
     return () => clearTimeout(id);
-  }, [onDone]);
+  }, [onDone, kind]);
 
   const N = pyramid.floorCount;
   const current = reducedMotion ? to : from + (to - from) * easeOutCubic(time / SLIDE_MS);
@@ -50,8 +57,11 @@ export function FloorOverview({
   const left = N - 1 - to;
   const keep = artifactTaken ? 'was kept' : 'is kept';
 
+  const climb = kind === 'escape' ? (reducedMotion ? 1 : easeInOut(time / (ESCAPE_MS - 500))) : undefined;
   const title =
-    kind === 'enter'
+    kind === 'escape'
+      ? 'Out through the shaft'
+      : kind === 'enter'
       ? 'You wake at the top'
       : kind === 'resume'
         ? to === 0
@@ -61,7 +71,9 @@ export function FloorOverview({
           ? 'The floor gave way'
           : `Floor ${to + 1} of ${N}`;
   const line =
-    left === 0
+    kind === 'escape'
+      ? `Daylight. The ${pyramid.artifact} is yours.`
+      : left === 0
       ? `The basement, where the ${pyramid.artifact} ${keep}. Find it.`
       : `Floor ${to + 1} of ${N}. ${left} ${left === 1 ? 'floor' : 'floors'} to the basement, where the ${pyramid.artifact} ${keep}.`;
 
@@ -78,19 +90,23 @@ export function FloorOverview({
         <ArtCanvas
           width={width}
           height={height}
-          deps={[current, reducedMotion ? 0 : time, artifactTaken]}
-          draw={(c, w, h) => drawPyramidSide(c, w, h, { pyramid, current, artifactTaken, time: reducedMotion ? 0 : time })}
+          deps={[current, reducedMotion ? 0 : time, artifactTaken, climb]}
+          draw={(c, w, h) => drawPyramidSide(c, w, h, { pyramid, current, artifactTaken: artifactTaken || kind === 'escape', time: reducedMotion ? 0 : time, escape: climb })}
         />
-        <Text style={[styles.marker, { left: m.x + 18, top: m.y - 10 }]} numberOfLines={1}>
-          Floor {Math.round(current) + 1}
-        </Text>
-        <Text
-          style={[styles.chamber, { left: L.chamber.x + L.chamber.w + 10, top: L.chamber.y + L.chamber.h / 2 - 18 }]}
-          numberOfLines={2}
-        >
-          Basement{'\n'}
-          {pyramid.artifact}
-        </Text>
+        {kind !== 'escape' && (
+          <Text style={[styles.marker, { left: m.x + 18, top: m.y - 10 }]} numberOfLines={1}>
+            Floor {Math.round(current) + 1}
+          </Text>
+        )}
+        {kind !== 'escape' && (
+          <Text
+            style={[styles.chamber, { left: L.chamber.x + L.chamber.w + 10, top: L.chamber.y + L.chamber.h / 2 - 18 }]}
+            numberOfLines={2}
+          >
+            Basement{'\n'}
+            {pyramid.artifact}
+          </Text>
+        )}
       </View>
       <Text style={[type.body, styles.line]}>{line}</Text>
       <Text style={type.caption}>Tap to continue</Text>

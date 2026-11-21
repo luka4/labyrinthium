@@ -3,6 +3,7 @@ import { useEffect } from 'react';
 import { ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
 import { warmLayouts } from '../../game/core/generate';
+import { EGYPT_ROWS } from '../../game/core/egypt';
 import { PYRAMIDS, campFloorNumbers, isPyramidId } from '../../game/core/pyramids';
 import { drawPyramidSide, sideLayout } from '../../game/render/drawPyramidSide';
 import { isUnlocked, useProgress } from '../../state/progress';
@@ -41,6 +42,8 @@ export default function PyramidScreen() {
   const height = Math.round(width * 0.72);
   const L = sideLayout(width, height, p.floorCount);
   const camps = campFloorNumbers(p);
+  // the first floor with a roaming guardian (Egypt only for now), from the rows
+  const guardianFrom = p.architecture === 'egypt' ? EGYPT_ROWS.findIndex((r) => r.guardian && !r.guardian.sentinel) : -1;
 
   const play = (from: 'top' | 'camp') => {
     if (from === 'top') useProgress.getState().startDescent(id);
@@ -71,6 +74,7 @@ export default function PyramidScreen() {
           <Fact label="Floors" value={`${p.floorCount}`} />
           <Fact label="Camp floors" value={listNumbers(camps)} />
           <Fact label="Deepest" value={deepest === undefined ? '—' : `floor ${deepest + 1}`} />
+          {guardianFrom >= 0 && <Fact label="Guardian" value={`from floor ${guardianFrom + 1}`} />}
         </View>
 
         <View style={styles.card}>
@@ -119,8 +123,8 @@ function Fact({ label, value }: { label: string; value: string }) {
 const styles = StyleSheet.create({
   content: { gap: space.lg, paddingVertical: space.md },
   chamber: { position: 'absolute', color: '#d8c49a', fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
-  facts: { flexDirection: 'row', gap: space.sm },
-  fact: { flex: 1, backgroundColor: colors.surface, borderRadius: radius.md, padding: space.md, gap: 4 },
+  facts: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
+  fact: { flex: 1, minWidth: 96, backgroundColor: colors.surface, borderRadius: radius.md, padding: space.md, gap: 4 },
   factValue: { color: colors.ink, fontFamily: fonts.bodySemi, fontSize: 15 },
   card: { borderWidth: 1, borderColor: colors.border, borderRadius: radius.md, padding: space.lg, gap: space.sm },
   center: { textAlign: 'center' },

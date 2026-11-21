@@ -4,7 +4,7 @@ import { DIRS, TILE, distancesFrom, type Collapse, type Fixture, type Item, type
 import type { GameState } from './game';
 import { articulationPoints, nearestOpen, reachable } from './graph';
 import { shuffle, type Rng } from './rng';
-import { buryItem, emit, loseHand, smotherFixture } from './runtime';
+import { buryItem, emit, invalidatePaths, loseHand, noise, recoilGuardian, smotherFixture } from './runtime';
 
 /**
  * Pressure-plate traps and trapdoors (plan 03). Placement runs after the lights (it needs items,
@@ -246,13 +246,44 @@ export function placeTraps(a: { layout: Layout; items: Item[]; fixtures: Fixture
 
 // ---- runtime -----------------------------------------------------------------------------
 
-/** You stepped on an armed plate or slab. `by`: the guardian (task 04) may also trigger them. */
+/** Sound carried by a plate's click, in path steps (the guardian hears it, whoever stepped on it). */
+const PLATE_NOISE = 7;
+const BLOCK_NOISE = 16;
+const SANDFALL_NOISE = 9;
+
+/** You (or the guardian, `by: 'other'`) stepped on an armed plate or slab. */
 export function pressPlate(s: GameState, k: number, by: 'player' | 'other') {
   if (s.trapPhase[k] !== 0) return;
   void by;
   s.trapPhase[k] = 1;
   s.trapTimer[k] = s.floor.traps[k].delay;
-  emit(s, 'plate', s.floor.traps[k].kind);
+  emit(s, 'plate', s.floor.traps[k].kind, s.floor.traps[k].tile);
+  noise(s, s.floor.traps[k].tile, PLATE_NOISE);
+}
+
+/** The guardian stands on a tile that has just been sealed: the stone drives it back and it recoils. */
+function hitGuardian(s: GameState, tile: number) {
+  const g = s.guardian;
+  if (!g || g.pos !== tile || g.mode === 'dormant' || g.mode === 'arriving' || g.mode === 'gone') return;
+  let to = g.prev !== tile && openTile(s, g.prev) ? g.prev : -1;
+  if (to < 0) {
+    const { size } = s.grid;
+    for (const [dx, dy] of DIRS) {
+      const q = tile + dy * size + dx;
+      if (openTile(s, q)) {
+        to = q;
+        break;
+      }
+    }
+  }
+  if (to >= 0) {
+    g.pos = to;
+    g.prev = to;
+  }
+  g.cooldown = 0;
+  g.stepDur = 0.3;
+  recoilGuardian(s, 4);
+  emit(s, 'guardianHit', null, tile);
 }
 
 function openTile(s: GameState, t: number) {
@@ -283,19 +314,24 @@ function fire(s: GameState, k: number) {
   const trap = s.floor.traps[k];
   s.trapPhase[k] = 2;
   s.trapTimer[k] = 0;
-  emit(s, 'trapFired', trap.kind);
+  emit(s, 'trapFired', trap.kind, trap.tile);
   const { size } = s.grid;
   const seal = (tile: number) => {
     s.grid.solid[tile] = 1;
     s.grid.opaque[tile] = 1;
     s.opaqueDirty = true;
     s.solidDirty = true;
+    invalidatePaths(s);
+    hitGuardian(s, tile);
   };
+  if (trap.kind === 'sandfall') noise(s, trap.tile, SANDFALL_NOISE);
   if (trap.kind === 'block') {
+    noise(s, trap.tile, BLOCK_NOISE);
     seal(trap.tile);
     if (s.pos === trap.tile) hit(s, 'block', trap.tile, s.prevPos);
     if (s.collapse?.started) rebuildRank(s);
   } else if (trap.kind === 'portcullis') {
+    noise(s, trap.target, BLOCK_NOISE);
     seal(trap.target);
     if (s.pos === trap.target) {
       // far side: opposite the plate

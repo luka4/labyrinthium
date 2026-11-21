@@ -17,8 +17,10 @@ import {
   type FixtureKind,
   type ItemKind,
 } from './lights';
+import { EXIT_LIGHT, takeArtifact, tickEscape, type EscapeRun } from './escape';
+import { NOISE, QUIET_GAP, followGap, noteGuardianSeen, startGuardian, tickGuardian, touchIfMet, type GuardianRun } from './guardian';
 import { bfsFrom } from './graph';
-import { emit, lightSpare, setHand } from './runtime';
+import { emit, lightSpare, noise, setHand } from './runtime';
 import { LAND_STUN, pressPlate, resolveLanding, tickTraps } from './traps';
 import { clearLine, computeLight } from './vision';
 
@@ -43,9 +45,10 @@ export type Pyramid = {
 
 /**
  * descending: on the stairs; falling: through a trapdoor (`continue` lands you below);
- * buried: sand closed every way down (`retry`); escaped: the artifact on the basement floor was taken.
+ * buried: sand closed every way down (`retry`); caught: the guardian took you on embers (`retry`);
+ * escaped: you left the basement (through the false door when it has one).
  */
-export type Status = 'playing' | 'descending' | 'falling' | 'burntOut' | 'buried' | 'escaped';
+export type Status = 'playing' | 'descending' | 'falling' | 'burntOut' | 'buried' | 'caught' | 'escaped';
 
 /** What the UI may react to (captions, haptics). Only the last EVENT_LOG are kept. */
 export type GameEvent = {
@@ -65,8 +68,23 @@ export type GameEvent = {
     | 'quake'
     | 'sandNear'
     | 'sealed'
-    | 'buriedItem';
+    | 'buriedItem'
+    | 'guardianWake'
+    | 'guardianStep'
+    | 'guardianSpotted'
+    | 'guardianLost'
+    | 'guardianNear'
+    | 'guardianTouch'
+    | 'guardianHit'
+    | 'guardianFollow'
+    | 'guardianGone'
+    | 'snuffed'
+    | 'caught'
+    | 'artifactTaken'
+    | 'exitOpened';
   kind: ItemKind | FixtureKind | TrapKind | null;
+  /** the tile it happened on (stereo sound, haptics), or -1 */
+  at: number;
 };
 
 /** Something lying on the floor: a light source with its seconds, or an oil jar. */
@@ -140,12 +158,24 @@ export type GameState = {
   handR: number;
   fixedDirty: boolean;
   lowWarned: boolean;
+  /** the tomb guardian (plan 04), or null on floors without one */
+  guardian: GuardianRun | null;
+  /** the basement's escape (null when the floor has no false door) */
+  escape: EscapeRun | null;
+  /** seconds since the last move: a step after a pause is quiet */
+  idle: number;
+  /** burning seconds on this floor (a stars hook for task 05) */
+  floorTime: number;
+  /** pending [tile, radius] pairs the guardian will hear */
+  noises: number[];
 };
 
 export type StartOptions = {
   /** a trapdoor fall: the world point (floor centre = 0,0) you drop to */
   landing?: { x: number; y: number };
   skipped?: number;
+  /** a guardian was after you on the floor above: it arrives after `gap` seconds of burning */
+  follow?: { gap: number };
 };
 
 export type Action =
@@ -228,10 +258,15 @@ export function startFloor(
     handR: -1,
     fixedDirty: true,
     lowWarned: false,
+    guardian: startGuardian(floor, opts.follow),
+    escape: floor.exit >= 0 ? { taken: false, t: 0, open: false, openIn: 0 } : null,
+    idle: 1,
+    floorTime: 0,
+    noises: [],
   };
   state.walkedAt[floor.start] = 0;
   if (opts.landing) {
-    const land = resolveLanding(floor, opts.landing);
+    const land = resolveLanding(floor, opts.landing, floor.collapse, floor.guardian ? [floor.guardian.lair] : []);
     if (land >= 0) {
       state.pos = state.prevPos = land;
       state.landing = land;
@@ -241,6 +276,7 @@ export function startFloor(
     }
   }
   relight(state, true);
+  noteGuardianSeen(state);
   return state;
 }
 
@@ -273,6 +309,8 @@ function relight(s: GameState, moved: boolean) {
       s.fixtureR[i] = fr;
       computeLight(grid, f.tile, fr, FIXTURE[f.kind].falloff, s.lightFixed, true);
     });
+    // daylight down the escape shaft once the false door is open
+    if (s.escape?.open) computeLight(grid, floor.exit, EXIT_LIGHT.radius, EXIT_LIGHT.falloff, s.lightFixed, true);
     s.fixedDirty = false;
   }
   if (!handChanged && !dirty) return;
@@ -386,11 +424,11 @@ function burn(s: GameState, dt: number) {
   });
 }
 
-/** Is any way down left (the stairs, or a trapdoor that is still armed)? */
+/** Is any way down left (the stairs, the false door once the artifact is taken, or a trapdoor that is still armed)? */
 function wayDownLeft(s: GameState): boolean {
   const dist = new Int32Array(s.grid.size * s.grid.size);
   bfsFrom(s.grid.solid, s.grid.size, s.pos, dist);
-  if (dist[s.floor.stairs] >= 0) return true;
+  if (dist[s.escape?.taken ? s.floor.exitFront : s.floor.stairs] >= 0) return true;
   const { traps } = s.floor;
   for (let k = 0; k < traps.length; k++) if (traps[k].kind === 'trapdoor' && s.trapPhase[k] === 0 && dist[traps[k].tile] >= 0) return true;
   return false;
@@ -406,7 +444,16 @@ export function step(s: GameState, action: Action): GameState {
       const x = (s.pos % size) + dx;
       const y = Math.floor(s.pos / size) + dy;
       const next = y * size + x;
-      if (x < 0 || y < 0 || x >= size || y >= size || solid[next]) return s;
+      if (x < 0 || y < 0 || x >= size || y >= size) return s;
+      const g = s.guardian;
+      if (g && (g.mode === 'dormant' || g.mode === 'waking') && g.pos === next) {
+        // a statue in the way: you bump it, and it hears that
+        noise(s, next, NOISE.bump);
+        return s;
+      }
+      if (solid[next]) return s;
+      const quiet = s.idle >= QUIET_GAP;
+      s.idle = 0;
       // carry the unused part of the last tick over: an exact cadence at any frame rate; wading is slower
       const wade = sandLevel(s, next) >= COVER ? WADE : 1;
       s.cooldown = (s.cooldown > -STEP_SECONDS ? s.cooldown : 0) + STEP_SECONDS * wade;
@@ -417,18 +464,28 @@ export function step(s: GameState, action: Action): GameState {
       s.burning = true;
       s.trail++;
       s.walkedAt[next] = s.trail;
+      const seq0 = s.eventSeq;
       pickUp(s);
       lightFixtures(s);
+      if (s.eventSeq !== seq0 && s.events.some((e) => e.seq > seq0 && (e.type === 'pickup' || e.type === 'refill' || e.type === 'lit'))) noise(s, next, NOISE.pickup);
       if (next === s.floor.stairs) {
-        s.status = isBasement(s.pyramid, s.floorIndex) ? 'escaped' : 'descending';
+        if (!isBasement(s.pyramid, s.floorIndex)) s.status = 'descending';
+        else if (s.escape) takeArtifact(s);
+        else s.status = 'escaped';
+      } else if (s.escape?.open && next === s.floor.exit) {
+        s.status = 'escaped';
       } else {
         const k = s.floor.trapAt[next];
         if (k >= 0 && s.trapPhase[k] === 0) pressPlate(s, k, 'player');
       }
+      noise(s, next, quiet ? NOISE.quiet : NOISE.step);
+      touchIfMet(s);
       relight(s, true);
+      noteGuardianSeen(s);
       return s;
     }
     case 'tick': {
+      s.idle += action.seconds;
       if (s.status !== 'playing') return s;
       s.cooldown = Math.max(-STEP_SECONDS, s.cooldown - action.seconds);
       if (!s.burning) return s;
@@ -438,8 +495,11 @@ export function step(s: GameState, action: Action): GameState {
         return s;
       }
       const from = s.pos;
+      s.floorTime += action.seconds;
       tickTraps(s, action.seconds);
       tickCollapse(s, action.seconds);
+      tickEscape(s, action.seconds);
+      tickGuardian(s, action.seconds);
       if (s.solidDirty) {
         s.solidDirty = false;
         if (s.status === 'playing' && !wayDownLeft(s)) {
@@ -448,6 +508,7 @@ export function step(s: GameState, action: Action): GameState {
         }
       }
       relight(s, s.pos !== from);
+      noteGuardianSeen(s);
       return s;
     }
     case 'swap': {
@@ -476,10 +537,10 @@ export function step(s: GameState, action: Action): GameState {
         const kind = CARRY[hand.kind].seconds >= CARRY.torch.seconds ? hand.kind : 'torch';
         hand = { kind, left: CARRY[kind].seconds };
       }
-      return startFloor(s.pyramid, next, hand, s.bag, s.steps, hand.left > 0 ? 0 : s.ember, { skipped: s.skipped });
+      return startFloor(s.pyramid, next, hand, s.bag, s.steps, hand.left > 0 ? 0 : s.ember, { skipped: s.skipped, follow: followGap(s) });
     }
     case 'retry': {
-      if (s.status !== 'burntOut' && s.status !== 'buried') return s;
+      if (s.status !== 'burntOut' && s.status !== 'buried' && s.status !== 'caught') return s;
       return startFloor(s.pyramid, lastCamp(s.pyramid, s.floorIndex), startHand(), [], s.steps);
     }
   }

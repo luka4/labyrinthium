@@ -1,5 +1,6 @@
 import type { ArchProfileId } from './architecture';
-import type { Pyramid } from './game';
+import type { Direction, Pyramid } from './game';
+import type { GuardianRow } from './egypt';
 import type { FixtureKind, ItemKind } from './lights';
 
 /**
@@ -102,13 +103,27 @@ export type Collapse = {
   rate: number;
   /** most tiles covered */
   cap: number;
+  /** order entries the sand reaches before the artifact is taken (= order.length without an escape) */
+  capLen: number;
   /** sand-graph tiles in BFS order from the STAIRS_UP tiles, ranked part only */
   order: Int32Array;
   /** per tile: index in `order`, or -1 */
   rank: Int32Array;
   /** per tile: BFS steps from the source, -1 unreached */
   sdist: Int32Array;
+  /** tiles the sand never takes: the way from the artifact to the false door (basement), or null */
+  protect: Uint8Array | null;
 };
+
+/** The guardian of a floor: where it stands while dormant, where it walks, how fast (plan 04). */
+export type GuardianPlan = {
+  /** the tile it stands on while dormant (the sentinel's post in the basement) */
+  lair: number;
+  /** facing while dormant: out of the niche / towards the burial door */
+  facing: Direction;
+  /** patrol waypoints (room anchor tiles), generation order */
+  route: Int32Array;
+} & GuardianRow;
 
 export type Floor = {
   /** tiles per side */
@@ -148,6 +163,12 @@ export type Floor = {
   eligiblePorts: number;
   /** the collapse from floor 11 on (collapse.ts), else null */
   collapse: Collapse | null;
+  /** the false door: a ROCK tile that opens onto the escape shaft (basement of Egypt), or -1 */
+  exit: number;
+  /** the open tile in front of the false door (south of it), or -1 */
+  exitFront: number;
+  /** the tomb guardian, or null */
+  guardian: GuardianPlan | null;
 };
 
 /**
@@ -155,7 +176,7 @@ export type Floor = {
  * Floor i+1's arrival needs floor i's stairs and trapdoors on floor i need floor i+1's layout, so
  * layouts are generated first (generate.ts `layoutFor`) and features are added per floor played.
  */
-export type Layout = Omit<Floor, 'items' | 'fixtures' | 'traps' | 'trapAt' | 'eligiblePorts' | 'collapse'> & {
+export type Layout = Omit<Floor, 'items' | 'fixtures' | 'traps' | 'trapAt' | 'eligiblePorts' | 'collapse' | 'exit' | 'exitFront' | 'guardian'> & {
   braziers: Fixture[];
   arrivalRoom: number;
   stairsRoom: number;

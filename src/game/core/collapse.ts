@@ -2,7 +2,7 @@ import type { EgyptRow } from './egypt';
 import { DIRS, TILE, type Collapse, type Layout } from './floor';
 import type { GameState } from './game';
 import { reachable } from './graph';
-import { buryItem, emit, smotherFixture } from './runtime';
+import { buryItem, emit, invalidatePaths, smotherFixture } from './runtime';
 
 /**
  * The collapse (plan 03): from Egypt floor 11 the ceiling over the stairwell you came by gives
@@ -36,10 +36,10 @@ type SandLayout = Pick<Layout, 'size' | 'tiles' | 'solid' | 'opaque' | 'stairs'>
 /**
  * The BFS order of the sand from the STAIRS_UP tiles over tiles that let light through (sand flows
  * over benches, braziers and the sarcophagus, never down the stairs or onto the goal), cut at the
- * cap plus the slope. If the stairs' side would keep less than 40 % of the open tiles the cap is
- * lowered, deterministically.
+ * cap plus the slope. If the stairs' side would keep less than `keepPct` (40) % of the open tiles the
+ * cap is lowered, deterministically.
  */
-export function sandOrder(layout: SandLayout, row: NonNullable<EgyptRow['collapse']>): SandOrder {
+export function sandOrder(layout: SandLayout, row: NonNullable<EgyptRow['collapse']>, keepPct = 40, protect: Uint8Array | null = null): SandOrder {
   const { size, tiles, opaque, stairs } = layout;
   const n = size * size;
   const sdist = new Int32Array(n).fill(-1);
@@ -59,7 +59,7 @@ export function sandOrder(layout: SandLayout, row: NonNullable<EgyptRow['collaps
       const ny = py + dy;
       if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
       const q = ny * size + nx;
-      if (sdist[q] >= 0 || opaque[q] || tiles[q] === TILE.STAIRS_DOWN || q === stairs) continue;
+      if (sdist[q] >= 0 || opaque[q] || tiles[q] === TILE.STAIRS_DOWN || q === stairs || (protect && protect[q])) continue;
       sdist[q] = sdist[p] + 1;
       queue.push(q);
       full.push(q);
@@ -78,7 +78,7 @@ export function sandOrder(layout: SandLayout, row: NonNullable<EgyptRow['collaps
     for (let k = 0; k < total; k++) solid[full[k]] = 1;
     // the stairs' side must keep 40 % of the open tiles
     const keep = stairs >= 0 && !solid[stairs] ? reachable(solid, size, stairs) : 0;
-    if (keep * 10 >= open * 4 || cap <= 1) {
+    if (keep * 100 >= open * keepPct || cap <= 1) {
       const order = Int32Array.from(full.slice(0, total));
       const rank = new Int32Array(n).fill(-1);
       order.forEach((t, k) => (rank[t] = k));
@@ -93,7 +93,20 @@ export function sandOrder(layout: SandLayout, row: NonNullable<EgyptRow['collaps
 export function buildSandOrder(layout: SandLayout, row: EgyptRow['collapse']): Collapse | null {
   if (!row) return null;
   const { order, rank, sdist, cap } = sandOrder(layout, row);
-  return { delay: row.delay, rate: row.rate, cap, order, rank, sdist };
+  return { delay: row.delay, rate: row.rate, cap, capLen: order.length, order, rank, sdist, protect: null };
+}
+
+/**
+ * The basement's escape sand (plan 04): once the artifact is taken the sand runs on to `escapeCap` %
+ * of the open tiles, but never over `protect`, the route from the artifact to the false door. The
+ * first `capLen` entries are the sand that falls before the artifact is taken (identical to `plain`);
+ * if the longer order would not extend it, the plain order stays.
+ */
+export function extendSandOrder(layout: SandLayout, row: NonNullable<EgyptRow['collapse']>, plain: Collapse, escapeCap: number, protect: Uint8Array): Collapse {
+  const b = sandOrder(layout, { ...row, cap: escapeCap }, 0, protect);
+  let same = b.order.length > plain.order.length;
+  for (let k = 0; same && k < plain.order.length; k++) if (b.order[k] !== plain.order[k]) same = false;
+  return same ? { ...plain, order: b.order, rank: b.rank, sdist: b.sdist, protect } : { ...plain, protect };
 }
 
 /** Per-run collapse state (the static plan is `floor.collapse`). */
@@ -106,8 +119,10 @@ export type CollapseRun = {
   /** order entries covered / blocked so far */
   covered: number;
   blocked: number;
-  /** pace multiplier; the guardian task (04) may change it */
+  /** pace multiplier: the artifact's escape sand pours faster (plan 04) */
   speed: number;
+  /** order entries the sand may reach now: `plan.capLen`, all of `order` once the artifact is taken */
+  limit: number;
   /** run copies: traps that seal a passage re-rank the sand */
   rank: Int32Array;
   order: Int32Array;
@@ -119,7 +134,7 @@ export type CollapseRun = {
 
 export function startCollapse(c: Collapse | null): CollapseRun | null {
   return c
-    ? { started: false, t: 0, fill: 0, covered: 0, blocked: 0, speed: 1, rank: c.rank.slice(), order: c.order.slice(), sdist: c.sdist.slice(), pending: -1, lastNear: -1e9 }
+    ? { started: false, t: 0, fill: 0, covered: 0, blocked: 0, speed: 1, limit: c.capLen, rank: c.rank.slice(), order: c.order.slice(), sdist: c.sdist.slice(), pending: -1, lastNear: -1e9 }
     : null;
 }
 
@@ -134,6 +149,7 @@ export function blockTile(s: GameState, i: number) {
   s.grid.opaque[i] = 1;
   s.opaqueDirty = true;
   s.solidDirty = true;
+  invalidatePaths(s);
 }
 
 /** Applies the pending tile once you have left it. */
@@ -198,7 +214,7 @@ export function rebuildRank(s: GameState) {
         const ny = py + dy;
         if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
         const q = ny * size + nx;
-        if (visited[q] || s.grid.opaque[q] || s.floor.tiles[q] === TILE.STAIRS_DOWN || q === s.floor.stairs) continue;
+        if (visited[q] || s.grid.opaque[q] || s.floor.tiles[q] === TILE.STAIRS_DOWN || q === s.floor.stairs || q === s.floor.exit || s.floor.collapse?.protect?.[q]) continue;
         visited[q] = 1;
         sdist[q] = d + 1;
         order.push(q);
@@ -227,7 +243,8 @@ export function tickCollapse(s: GameState, dt: number) {
     c.started = true;
     emit(s, 'quake', null);
   }
-  if (c.fill < c.order.length) c.fill = Math.min(c.order.length, c.fill + plan.rate * c.speed * dt);
+  const reach = Math.min(c.limit, c.order.length);
+  if (c.fill < reach) c.fill = Math.min(reach, c.fill + plan.rate * c.speed * dt);
   const n = Math.floor(c.fill);
   if (n <= 0) return;
   const { order, sdist } = c;

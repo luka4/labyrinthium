@@ -1,8 +1,11 @@
 import { BlendMode, ClipOp, FilterMode, MipmapMode, Skia, type SkCanvas } from '@shopify/react-native-skia';
 
 import { isBasement, type GameState } from '../core/game';
+import { guardianCue } from '../core/guardian';
 import { STEP_SECONDS } from '../core/lights';
 import { diamond, fill, glow, hash01, rgba } from './art';
+import { drawGuardian, drawGuardianGhost } from './drawGuardian';
+import { WISP_SECONDS, drawCarriedScarab, drawExit, drawPointer, drawScarab, drawWisp } from './drawEscape';
 import type { FloorArt } from './floorArt';
 import { createSandRenderer, type SandRenderer } from './drawSand';
 import { drawTraps } from './drawTraps';
@@ -34,6 +37,8 @@ export type Frame = {
   prevPos: number;
   /** 0..1 while a trapdoor opens under you (status `falling`) */
   fall: number;
+  /** flames the guardian put out lately: the tile and the render time it happened (smoke wisps) */
+  wisps: ReadonlyArray<{ at: number; t0: number }>;
 };
 
 /** What the board draws besides the game state: the floor's art, the light mask, the sand and the palette. */
@@ -69,7 +74,10 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
   const prog = Math.min(1, Math.max(0, 1 - s.cooldown / STEP_SECONDS));
 
   const style = s.hand.left > 0 ? LIGHT_STYLE[s.hand.kind] : EMBER_STYLE;
-  const handF = flicker(style, time);
+  // a cold draught: your flame gutters and leans when the guardian is close behind the walls (render only)
+  const cue = s.guardian ? guardianCue(s) : null;
+  const draught = cue && !cue.visible && cue.path >= 0 && cue.path <= 8 && cue.mode !== 'dormant' ? (9 - cue.path) / 8 : 0;
+  const handF = flicker(style, time) * (1 - draught * 0.2 * (0.5 + 0.5 * Math.sin(time * 29) * Math.sin(time * 6.1)));
 
   canvas.drawColor(rgba('#000000'));
   canvas.save();
@@ -116,8 +124,18 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
     drawFixtureBody(canvas, f.kind, cx(f.tile), f.kind === 'sconce' ? (Math.floor(f.tile / size)) * t : cy(f.tile), t, lit);
   });
   sand.draw(canvas, s, win, t, time);
-  if (isBasement(s.pyramid, s.floorIndex)) artifact(canvas, cx(stairs), cy(stairs), t, handF);
+  drawExit(canvas, s, theme, t, time);
+  if (s.escape) drawScarab(canvas, cx(stairs), cy(stairs), t, s.escape.taken, time);
+  else if (isBasement(s.pyramid, s.floorIndex)) artifact(canvas, cx(stairs), cy(stairs), t, handF);
   else glow(canvas, cx(stairs), cy(stairs), t * 1.8, 0.35, '#5f86e8');
+  if (s.escape && !s.escape.taken) glow(canvas, cx(stairs), cy(stairs) - t * 0.1, t * 1.7 * handF, 0.45);
+  for (const w of frame.wisps) {
+    if (time - w.t0 < WISP_SECONDS && inView(w.at)) drawWisp(canvas, cx(w.at), cy(w.at) - t * 0.3, t, time - w.t0, w.at);
+  }
+  if (s.guardian) {
+    drawGuardianGhost(canvas, s, t);
+    drawGuardian(canvas, s, theme, t, time);
+  }
 
   const lit = mask.render(s, prog, handF, 1, win);
   if (lit) canvas.drawImageRectOptions(lit.image, { x: 0, y: 0, width: lit.w * 2, height: lit.h * 2 }, { x: lit.x0 * t, y: lit.y0 * t, width: lit.w * t, height: lit.h * t }, FilterMode.Linear, MipmapMode.None, maskPaint);
@@ -134,6 +152,11 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
     const fl = flicker(st, time, hash01(f.tile) * 6.28);
     softGlow(canvas, cx(f.tile), cy(f.tile) - (f.kind === 'sconce' ? t * 0.55 : t * 0.2), (s.fixtureR[k] + 1) * t * fl, st.tint, st.color, BlendMode.SrcATop);
   });
+  // daylight down the shaft: a cool tint where the door is in sight
+  if (s.escape?.open && inView(s.floor.exit) && s.lightSeen[s.floor.exit] > 0) {
+    const st = LIGHT_STYLE.daylight;
+    softGlow(canvas, cx(s.floor.exit), cy(s.floor.exit) + t * 0.5, 3.4 * t * flicker(st, time), st.tint, st.color, BlendMode.SrcATop);
+  }
   canvas.restore();
 
   // flames of what burns and is in sight: emissive, over the dark
@@ -150,7 +173,8 @@ export function drawGame(canvas: SkCanvas, s: GameState, layers: Layers, view: V
 
   // dropping through a trapdoor: smaller and darker into the pit
   const sink = s.status === 'falling' ? 1 - 0.75 * frame.fall : 1;
-  player(canvas, s, px, py + (1 - sink) * t * 0.2, t * sink, style.color, handF, frame.prevPos === s.pos ? 0 : Math.sign(tx - fx) * (1 - prog), time);
+  drawPointer(canvas, s, px, py, t, time);
+  player(canvas, s, px, py + (1 - sink) * t * 0.2, t * sink, style.color, handF, (frame.prevPos === s.pos ? 0 : Math.sign(tx - fx) * (1 - prog)) + draught * 0.5, time);
   if (sink < 1) canvas.drawCircle(px, py, t * 0.5 * (1 - sink), fill(rgba('#000000', 0.5 * (1 - sink))));
   canvas.restore();
 }
@@ -177,6 +201,7 @@ function player(canvas: SkCanvas, s: GameState, x: number, y: number, t: number,
   const a = flameAnchor(s.hand.kind);
   const fxp = hx + a.dx * t * k;
   const fyp = hy + a.dy * t * k;
+  if (s.escape?.taken) drawCarriedScarab(canvas, x - t * 0.3, y + t * 0.04, t, time);
   if (s.hand.left > 0) {
     const low = Math.min(1, s.hand.left / 12);
     const style = LIGHT_STYLE[s.hand.kind];

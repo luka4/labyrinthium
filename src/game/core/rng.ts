@@ -18,3 +18,14 @@ export function shuffle<T>(items: T[], rng: Rng): T[] {
   }
   return items;
 }
+
+/**
+ * One step of mulberry32 on a stored state (same algorithm as `createRng`), for runtime state that
+ * must be hashed and replayed: `box.rng` is the state, the returned number is in [0, 1).
+ */
+export function nextRandom(box: { rng: number }): number {
+  box.rng = (box.rng + 0x6d2b79f5) | 0;
+  let t = Math.imul(box.rng ^ (box.rng >>> 15), 1 | box.rng);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}

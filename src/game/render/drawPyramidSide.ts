@@ -17,7 +17,12 @@ export type SideView = {
   artifactTaken: boolean;
   /** time in ms, for flicker and pulse; constant when motion is reduced */
   time: number;
+  /** the escape (plan 04): 0..1 along the workmen's shaft from the basement chamber to daylight; the torch marker rides it */
+  escape?: number;
 };
+
+/** The descending passages of the real pyramids slope at about 26 degrees; the escape shaft climbs at the same angle. */
+const SHAFT_ANGLE = (26 * Math.PI) / 180;
 
 export function sideLayout(width: number, height: number, floors: number) {
   const top = height * 0.16;
@@ -45,6 +50,14 @@ export function sideLayout(width: number, height: number, floors: number) {
     chamber: { x: cx - bw / 2, y: by, w: bw, h: bh },
     /** where the torch marker sits for a (fractional) floor */
     marker: (k: number) => ({ x: cx + tierWidth(k) / 2 + 20, y: tierY(k) + th / 2 }),
+    /** a point on the escape shaft, 0 at the basement chamber to 1 at the mouth on the ground outside the base */
+    shaft: (u: number) => {
+      const sx = cx + bw / 2;
+      const sy = by + bh / 2;
+      const dy = sy - ground;
+      const dx = dy / Math.tan(SHAFT_ANGLE);
+      return { x: sx + dx * u, y: sy - dy * u, mouth: { x: sx + dx, y: ground } };
+    },
   };
 }
 
@@ -103,6 +116,20 @@ export function drawPyramidSide(canvas: SkCanvas, width: number, height: number,
     const pulse = 0.85 + 0.15 * Math.sin(v.time / 320);
     glow(canvas, ax, ay, c.h * 0.8 * pulse, 0.75);
     diamond(canvas, ax, ay, c.h * 0.14, c.h * 0.22, rgba('#ffe7a3'));
+  }
+
+  // the escape shaft: a narrow passage rising at 26 degrees to a small mouth in the daylight
+  if (v.escape !== undefined) {
+    const a = L.shaft(0);
+    const b = L.shaft(1);
+    glow(canvas, b.x, b.y - 4, 34, 0.55, '#cfd8e6');
+    canvas.drawLine(a.x, a.y, b.x, b.y, stroke(rgba('#050403'), 7));
+    canvas.drawLine(a.x, a.y, b.x, b.y, stroke(rgba(p.color, 1, 0.5), 1.5));
+    canvas.drawCircle(b.x, b.y - 1, 6, fill(rgba('#dfe7f2')));
+    const e = L.shaft(Math.max(0, Math.min(1, v.escape)));
+    glow(canvas, e.x, e.y, 22 * flick, 0.9, '#ffb446');
+    canvas.drawCircle(e.x, e.y, 6, fill(rgba('#fff1c4')));
+    return;
   }
 
   // torch marker

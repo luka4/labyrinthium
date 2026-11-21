@@ -15,7 +15,7 @@ import {
 import { BAG_SIZE, CARRY, EMBER, STEP_SECONDS, radiusOf } from '../src/game/core/lights';
 import { MEMORY_STEPS, memoryLevel } from '../src/game/core/memory';
 import { COVER, sandLevel } from '../src/game/core/collapse';
-import { EGYPT_ROWS } from '../src/game/core/egypt';
+import { EGYPT_ROWS, ESCAPE_TARGET } from '../src/game/core/egypt';
 import { PYRAMIDS } from '../src/game/core/pyramids';
 import { createRng } from '../src/game/core/rng';
 import { exits, holdDir, runDir } from '../src/game/core/walk';
@@ -88,6 +88,24 @@ function hashState(s: GameState, full = false): string {
     for (let k = 0; k < s.status.length; k++) mix(s.status.charCodeAt(k));
     num(s.prevPos);
     num(s.skipped);
+    // plan 04: the guardian and the escape (only on floors that have them, so older hashes stay)
+    const g = s.guardian;
+    if (g) {
+      for (let k = 0; k < g.mode.length; k++) mix(g.mode.charCodeAt(k));
+      num(g.pos);
+      num(g.cooldown);
+      num(g.timer);
+      num(g.rng);
+      num(g.target);
+      num(g.touches);
+      num(s.floorTime);
+      num(s.idle);
+    }
+    if (s.escape) {
+      num(s.escape.taken ? 1 : 0);
+      num(s.escape.t);
+      num(s.escape.open ? 1 : 0);
+    }
   }
   return h.toString(16);
 }
@@ -275,7 +293,7 @@ export function runLightChecks({ fail, warn, snapshot, old, update }: Report) {
   }
 
   // ---- replay determinism -----------------------------------------------------------
-  for (const fi of [0, 4, 8, 10, 16, 23]) {
+  for (const fi of [0, 4, 8, 10, 16, 17, 21, 23, 24]) {
     const full = fi >= 10;
     const hashes: string[] = [];
     for (let run = 0; run < 2; run++) {
@@ -324,8 +342,8 @@ export function runLightChecks({ fail, warn, snapshot, old, update }: Report) {
         if (e.type === 'fell') row.falls++;
       }
       lastSeq = s.eventSeq;
-      if (s.status === 'burntOut' || s.status === 'buried') {
-        if (s.status === 'burntOut') row.burnt++;
+      if (s.status === 'burntOut' || s.status === 'buried' || s.status === 'caught') {
+        if (s.status === 'burntOut' || s.status === 'caught') row.burnt++;
         else row.sealed++;
         if (retries[s.floorIndex]++ >= 3) break;
         s = step(s, { type: 'retry' });
@@ -383,8 +401,8 @@ export function runLightChecks({ fail, warn, snapshot, old, update }: Report) {
 
   // ---- deep bot: floors 11-25 each with the reserves of a decent player (the plain bot cannot reach them) ----
   {
-    type Deep = { runs: number; sealed: number; burnt: number; used: number[]; hits: number; falls: number };
-    const deep: Deep[] = Array.from({ length: egypt.floorCount }, () => ({ runs: 0, sealed: 0, burnt: 0, used: [], hits: 0, falls: 0 }));
+    type Deep = { runs: number; sealed: number; burnt: number; caught: number; touches: number[]; escapes: number[]; used: number[]; hits: number; falls: number };
+    const deep: Deep[] = Array.from({ length: egypt.floorCount }, () => ({ runs: 0, sealed: 0, burnt: 0, caught: 0, touches: [], escapes: [], used: [], hits: 0, falls: 0 }));
     for (let seed = 1; seed <= SEEDS; seed++) {
       const pyramid: Pyramid = { ...egypt, id: `deep${seed}`, seed };
       for (let i = 10; i < pyramid.floorCount; i++) {
@@ -395,7 +413,14 @@ export function runLightChecks({ fail, warn, snapshot, old, update }: Report) {
         const d = deep[i];
         while (s.status === 'playing' && guard++ < 4000) {
           const dir = botDir(s, false) ?? botDir(s, true);
-          if (dir === null) break;
+          if (dir === null) {
+            if (s.escape?.taken && !s.escape.open) {
+              s = step(s, { type: 'tick', seconds: BOT_STEP });
+              t += BOT_STEP;
+              continue;
+            }
+            break;
+          }
           s = step(s, { type: 'tick', seconds: BOT_STEP });
           t += BOT_STEP;
           s = step(s, { type: 'move', dir });
@@ -406,23 +431,38 @@ export function runLightChecks({ fail, warn, snapshot, old, update }: Report) {
           lastSeq = s.eventSeq;
         }
         d.runs++;
+        d.touches.push(s.guardian?.touches ?? 0);
         if (s.status === 'buried') d.sealed++;
+        else if (s.status === 'caught') d.caught++;
         else if (s.status === 'burntOut' || s.status === 'playing') d.burnt++;
         else {
           d.used.push(t);
           if (s.status === 'falling') d.falls++;
+          if (s.status === 'escaped' && s.escape) d.escapes.push(s.escape.t);
         }
       }
     }
     console.log('deep bot (floors 11-25 alone, with a big torch, a lamp and a candle in reserve):');
-    console.log('floor runs median(s)/target sealed% failed hits falls');
+    console.log('floor runs median(s)/target sealed% failed hits falls caught% touches(median) escape(median s, success%)');
     const med = (a: number[]) => (a.length ? [...a].sort((x, y) => x - y)[a.length >> 1] : 0);
     deep.forEach((d, i) => {
       if (i < 10) return;
       const target = EGYPT_ROWS[i].target;
       const m = med(d.used);
       const rate = (d.sealed / d.runs) * 100;
-      console.log(`${i + 1} ${d.runs} ${m.toFixed(0)}/${target} ${rate.toFixed(0)}% ${d.burnt} ${d.hits} ${d.falls}`);
+      const caughtRate = (d.caught / d.runs) * 100;
+      const esc = i === egypt.floorCount - 1 ? ` ${med(d.escapes).toFixed(0)}s ${((d.escapes.length / d.runs) * 100).toFixed(0)}%` : '';
+      console.log(`${i + 1} ${d.runs} ${m.toFixed(0)}/${target} ${rate.toFixed(0)}% ${d.burnt} ${d.hits} ${d.falls} ${caughtRate.toFixed(0)}% ${med(d.touches)}${esc}`);
+      if (EGYPT_ROWS[i].guardian) {
+        if (caughtRate > 15) warn(`deep bot: floor ${i + 1} caught ${caughtRate.toFixed(0)}% (want <= 15)`);
+        if (med(d.touches) > 1) warn(`deep bot: floor ${i + 1} median touches ${med(d.touches)} (want <= 1)`);
+      }
+      if (i === egypt.floorCount - 1) {
+        const ok = (d.escapes.length / d.runs) * 100;
+        const e = med(d.escapes);
+        if (ok < 60) warn(`deep bot: escape success ${ok.toFixed(0)}% (want >= 60)`);
+        if (d.escapes.length >= 5 && (e < 0.5 * ESCAPE_TARGET || e > 1.5 * ESCAPE_TARGET)) warn(`deep bot: median escape ${e.toFixed(0)} s outside 0.5-1.5 x ${ESCAPE_TARGET} s`);
+      }
       if (d.used.length >= 5 && (m < 0.6 * target || m > 1.6 * target)) warn(`deep bot: floor ${i + 1} median ${m.toFixed(0)} s outside 0.6-1.6 x target ${target} s`);
       if (i <= 23 && (rate < 3 || rate > 20)) warn(`deep bot: floor ${i + 1} sealed-in rate ${rate.toFixed(0)}% outside 3-20 %`);
     });
@@ -439,7 +479,16 @@ function botDir(s: GameState, allowAvoided: boolean): Direction | null {
   const first = new Int8Array(size * size).fill(-1);
   const queue = [s.pos];
   dist[s.pos] = 0;
-  const stairsSeen = s.seenAt[floor.stairs] >= 0;
+  const escaping = !!s.escape?.taken;
+  const stairsSeen = escaping || s.seenAt[floor.stairs] >= 0;
+  // an informed bot (an upper bound): after the artifact it walks to the false door, around the guardian
+  const goal = escaping ? (s.escape!.open ? floor.exit : floor.exitFront) : floor.stairs;
+  const g = s.guardian;
+  const keepOff = new Set<number>();
+  if (g && g.pos >= 0 && g.mode !== 'dormant' && g.mode !== 'arriving' && g.mode !== 'gone') {
+    keepOff.add(g.pos);
+    for (const [dx, dy] of DIRS) keepOff.add(g.pos + dy * size + dx);
+  }
   let target = -1;
   for (let h = 0; h < queue.length && target < 0; h++) {
     const p = queue[h];
@@ -453,6 +502,9 @@ function botDir(s: GameState, allowAvoided: boolean): Direction | null {
       if (solid[q] || dist[q] >= 0) continue;
       // never walk over the stairs before the bot wants them
       if (q === floor.stairs && !stairsSeen) continue;
+      if (escaping && q === floor.stairs) continue;
+      if (keepOff.has(q) && !allowAvoided && !process.env.BOT_NAIVE) continue;
+      if (q === floor.exit && !s.escape?.open) continue;
       if (!allowAvoided) {
         const k = floor.trapAt[q];
         if (k >= 0 && s.trapPhase[k] === 0 && s.seenAt[q] >= 0) continue;
@@ -462,7 +514,7 @@ function botDir(s: GameState, allowAvoided: boolean): Direction | null {
       first[q] = p === s.pos ? d : first[p];
       queue.push(q);
       const wantItem = s.items.has(q) && s.seenAt[q] >= 0 && dist[q] <= 8 && itemUseful(s, q);
-      if (wantItem || (stairsSeen && q === floor.stairs) || (!stairsSeen && s.seenAt[q] < 0)) {
+      if (wantItem || (stairsSeen && q === goal) || (!stairsSeen && s.seenAt[q] < 0)) {
         target = q;
         break;
       }

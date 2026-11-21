@@ -69,6 +69,17 @@ export function drawLightHud(canvas: SkCanvas, s: GameState, w: number, time: nu
     softGlow(canvas, cx - 4, cy - 8, 8, 0.3 + 0.6 * p * Math.max(0, seconds / EMBER.seconds), '#c0401a');
   }
 
+  // the Golden Scarab in your pack (plan 04): a small gold glyph beside the bag
+  if (s.escape?.taken) {
+    const gx = slotX(0, w) - 20;
+    const gy = STRIP_H / 2;
+    softGlow(canvas, gx, gy, 14 + 2 * Math.sin(time * 4), 0.45, '#ffcf5a');
+    canvas.drawOval({ x: gx - 6, y: gy - 7, width: 12, height: 14 }, fill(rgba('#e8b240')));
+    canvas.drawOval({ x: gx - 4, y: gy - 3, width: 8, height: 9 }, fill(rgba('#f6d36e')));
+    canvas.drawRect({ x: gx - 0.5, y: gy - 3, width: 1, height: 9 }, fill(rgba('#7a5214', 0.8)));
+    canvas.drawRect({ x: gx - 6, y: gy, width: 12, height: 1.5 }, fill(rgba('#2f5fa8', 0.9)));
+  }
+
   // bag recesses
   for (let i = 0; i < BAG_SIZE; i++) {
     const x = slotX(i, w);

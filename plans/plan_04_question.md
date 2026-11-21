@@ -153,3 +153,42 @@ Planner entries for `plan_04.md`. Each: options, picked answer, one-line reason.
 
 ## Q34. Leaving or failing mid-escape
 **Picked:** as any run: leaving, burning out, being buried or caught returns you to camp 25 (the basement start) with the Scarab back on its plinth. No special save state; camps stay the only checkpoint.
+
+## Implementation decisions
+
+Entries by the implementation agent (task 04), against the real code of tasks 01-03.
+
+### I1. The escape sand cannot be a longer cut of the same order
+- A. As planned: `sandOrder(layout, {..., cap: escapeCap})` with the same 40 % keep rule. On the basement this gives the same order as the plain collapse: the order is a BFS from the arrival stairwell, the burial chamber is the farthest room, and as soon as the sand reaches its door the stairs' side keeps far less than 40 %, so the rule always lowers the cap back (fixed seed: cap 115, escape order 145 = capLen).
+- B. A weaker keep rule (25 %): same result, the burial door still ends the order.
+- C. Keep the tiles between the artifact and the false door out of the sand by construction. `placeExit` runs on the plain order, picks the door, and computes `protect` = one shortest way artifact -> exitFront on the worst-case mask (static + plain sand + traps + ports); `extendSandOrder` then runs the BFS to `escapeCap` (60 %) skipping `protect`. The first `capLen` entries stay identical to the plain order (checked at generation, else the plain order stays). `Collapse.protect` is also honoured by `rebuildRank` (a block that falls later may not re-rank the route into the sand).
+
+**Picked: C.** It is the only way the sand can really cover more of the floor, and the exit is reachable by construction instead of by a statistical keep rule. Fixed seed: capLen 145, escape order 610 of about 930 open tiles. The `egypt:24:feat` hash changes because of it (deliberate, as the plan said); every other `egypt:*`, `maya/cambodia/china/black:*` key is unchanged. The checks assert: `capLen <= order.length`, the 40 % rule on the first `capLen` entries, `protect` never in the order, and artifact -> exitFront reachable with the whole order and all trap tiles solid.
+
+### I2. `ESCAPE_TARGET` is 30 s, not 60 s
+The bot walks 0.3 s per tile (a hesitant player; a hurried one needs 0.15 s) and the false door sits at 0.65 of the farthest candidate (about 80-110 tiles on a 58-tile floor). The informed bot's median is 25 s; 60 s would need a 200-tile walk. The warn range 0.5-1.5 x target is kept, so 30 s means [15 s, 45 s]. A real player also has to find the door, so a human median is higher; tune from playtests, not from the bot.
+
+### I3. Sentinel post fallbacks
+On a handful of fuzz seeds the burial chamber is 3 tiles wide and the door's room offers no tile that is both off the main path and clear of the braziers' neighbours. Added two last tiers after the planned ones: any free tile within 3 steps of the door off the main path, then on it (still `fair`: connectivity, the way to the stairs and artifact -> exit on the worst-case mask). The check allows the sentinel to stand next to an eternal brazier (never on a fixture), and forbids it only next to traps and items. Fuzz seeds 1..100: every basement has a sentinel.
+
+### I4. Who may wake or hear what
+- The sentinel ignores noise and close sight while dormant (it must stay a statue until the Scarab is lifted); `noise()` is not queued while the guardian is `arriving` or `gone`.
+- `recoilGuardian` lives in `runtime.ts` (target = the route waypoint farthest from you by Manhattan distance) so `traps.ts` can drive a guardian back without importing `guardian.ts`; `hitGuardian` in `traps.ts` pushes it to its previous tile (or any open neighbour) when a block or portcullis seals the tile it stands on.
+- A guardian never steps on trapdoor tiles; armed plates only while hunting (or when the target is unreachable otherwise).
+- `g.cooldown` is clamped at -0.1 and at most 3 steps happen per tick, so a long `dt` (the check scripts tick 1 s) cannot teleport it.
+- The "felt before it is seen" `guardianNear` and the render-only flame gutter use `guardianCue`; the gutter modulates the flame and the light flicker (`handF`), never the lit set.
+
+### I5. UI details
+- The artifact screen gets this run's time through the route param `out` (the record keeps only the best), so the line reads "Out in m:ss · best m:ss".
+- The Scarab glyph on the light strip sits just left of the bag (the strip's right end is the bag itself).
+- `LIGHT_STYLE` is now `Record<LightKind | 'daylight', LightStyle>` (the plan's `LIGHT_STYLE.daylight`); `FloorTheme` gained `linen`, `linenDark`, `linenLight`, `mask`, `maskLight` (derived themes use the Egypt values).
+- The side view's shaft starts at the chamber's east wall and rises at 26 degrees to a mouth on the ground right of the base; `FloorOverview` kind `escape` lasts 3.2 s (a floor change 2.4 s).
+- The false door is baked on the south face of its rock tile; opening is a per-frame sprite (slab sinks, dust, then a shaft-mouth sprite over the whole tile and a daylight glow).
+
+### I6. Checks
+- `scripts/check-guardian.ts` runs inside `npm run check:floors`: placement and fairness on the fixed seeds and the 100 fuzz seeds, then the rule tests on scripted states (a straight corridor is carved along row 1 of the run's own grid copy so distances and cones are exact), plus timing. Snapshot keys added: `egypt:17..24:g`, `replay:17/21/24`; changed on purpose: `egypt:24:feat`, `replay:23` (guardian on floor 24); nothing else moved.
+- The deep bot walks to the false door after the Scarab (informed), keeps off the guardian's tile and neighbours, and reports caught %, median touches and escape success and time. `BOT_NAIVE=1` lets it walk through the guardian: touches median 1-2 and caught 0-5 % on floors 18-24, so the guardian is a threat but not a wall. The default run: caught 0 %, touches 0-1, escape 65 % at 25 s.
+- `tickGuardian` costs 0.02 ms on average on floor 24 (BFS per guardian step); `addFeatures` of the basement with the false door and sentinel takes about 4 ms.
+
+### Not verified
+No device or browser run: the guardian and escape visuals were rendered headlessly to PNG (canvaskit-wasm harness in the scratchpad, not committed): guardian poses at 120 px per tile, the false door closed, opening and open, the Scarab on its plinth and the empty plinth, the side view with the shaft. Touch feel with the guardian, 60 fps on a Redmi 9, haptics (placeholders) and the full-screen flow (caught panel, escape overview to artifact screen) are unverified.

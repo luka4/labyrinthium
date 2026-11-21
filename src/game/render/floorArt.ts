@@ -577,6 +577,7 @@ function recordFloor(floor: Floor, theme: FloorTheme, px: number): SkPicture {
    * The per-frame sprites (drawTraps.ts) draw over this when a trap is pressed or has fired.
    */
   function drawTelltales(canvas: SkCanvas) {
+    if (floor.exit >= 0) falseDoor(canvas, floor.exit % size, Math.floor(floor.exit / size));
     for (const t of floor.traps) {
       const x = t.tile % size;
       const y = Math.floor(t.tile / size);
@@ -586,6 +587,52 @@ function recordFloor(floor: Floor, theme: FloorTheme, px: number): SkPicture {
       else if (t.kind === 'sandfall') sandCone(canvas, x, y);
       else if (t.kind === 'portcullis') portcullis(canvas, t);
     }
+  }
+
+  /**
+   * The false door (plan 04) on the south face of the rock tile (x, y): a stepped recess with two
+   * nested jambs, a lintel carrying a cavetto cornice and a torus roll, and a narrow central slab with
+   * faint red-ochre and yellow paint and abstract strokes (no real inscription). It is a real door
+   * for the workmen's way out: drawers (drawEscape.ts) open it per frame.
+   */
+  function falseDoor(canvas: SkCanvas, x: number, y: number) {
+    const X = x * px;
+    const FY = (y + CAP_H) * px;
+    const FH = FACE * px;
+    const seed = x * 31 + y * 17;
+    // the recess: shadow behind the jambs
+    canvas.drawRect(R(X + px * 0.08, FY + FH * 0.04, px * 0.84, FH * 0.96), fill(rgba('#000000', 0.62)));
+    // outer jamb, then the inner step: lighter stone on the lit west edge, darker on the east
+    for (const [inset, shade] of [[0.08, 0.9], [0.17, 0.72]] as const) {
+      const w = px * (1 - 2 * inset);
+      const top = FY + FH * (0.04 + (inset - 0.08) * 1.4);
+      canvas.drawRect(R(X + px * inset, top, px * 0.06, FY + FH - top), fill(rgba(theme.faceTop, 1, shade)));
+      canvas.drawRect(R(X + px * inset + w - px * 0.06, top, px * 0.06, FY + FH - top), fill(rgba(theme.faceBottom, 1, shade * 0.95)));
+      canvas.drawRect(R(X + px * inset, top, w, px * 0.045), fill(rgba(theme.faceTop, 1, shade * 1.05)));
+    }
+    // lintel: a cavetto cornice (concave, darkening upwards) over a torus roll
+    const lintel = R(X + px * 0.06, FY, px * 0.88, FH * 0.17);
+    canvas.drawRect(lintel, gradient(0, lintel.y, 0, lintel.y + lintel.height, rgba(theme.faceBottom, 1, 0.8), rgba(theme.faceTop, 1, 0.95)));
+    paint.setShader(null);
+    canvas.drawRect(R(X + px * 0.06, FY + FH * 0.17, px * 0.88, line * 1.4), fill(rgba(theme.capEdge, 0.9)));
+    canvas.drawRect(R(X + px * 0.06, FY + FH * 0.17 + line * 1.4, px * 0.88, line * 0.9), fill(rgba('#000000', 0.45)));
+    for (const dx of [0.095, 0.895]) canvas.drawRect(R(X + px * dx, FY + FH * 0.19, line * 1.2, FH * 0.8), fill(rgba(theme.capEdge, 0.4)));
+    // the central slab and its faint paint
+    const slab = R(X + px * 0.31, FY + FH * 0.27, px * 0.38, FH * 0.73);
+    canvas.drawRect(slab, gradient(0, slab.y, 0, slab.y + slab.height, rgba('#6f5d44'), rgba('#3d3123')));
+    paint.setShader(null);
+    canvas.drawRect(slab, stroke(rgba('#000000', 0.55), line));
+    canvas.drawRect(R(slab.x, slab.y, slab.width, slab.height * 0.3), fill(rgba('#a14f33', 0.34)));
+    canvas.drawRect(R(slab.x, slab.y + slab.height * 0.3, slab.width, slab.height * 0.08), fill(rgba('#c9a23a', 0.3)));
+    // abstract strokes, never a real inscription
+    for (let k = 0; k < 5; k++) {
+      const gx = slab.x + slab.width * (0.15 + 0.7 * hash01(seed + k * 3.1));
+      const gy = slab.y + slab.height * (0.42 + 0.5 * hash01(seed + k * 7.7));
+      const vertical = hash01(seed + k) > 0.5;
+      canvas.drawRect(R(gx, gy, vertical ? line * 0.9 : px * 0.07, vertical ? px * 0.07 : line * 0.9), fill(rgba('#d3b36a', 0.32)));
+    }
+    // a handle-less pull ring: this door is not meant to be touched
+    canvas.drawCircle(X + px * 0.5, FY + FH * 0.62, px * 0.025, fill(rgba('#000000', 0.5)));
   }
 
   function plate(canvas: SkCanvas, x: number, y: number, seed: number) {

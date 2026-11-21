@@ -4,7 +4,7 @@
  */
 import { profileFor } from '../src/game/core/architecture';
 import { SLOPE, sandOrder } from '../src/game/core/collapse';
-import { DIRS, TILE, type Floor, type Layout, type TrapKind } from '../src/game/core/floor';
+import { DIRS, TILE, distancesFrom, type Floor, type Layout, type TrapKind } from '../src/game/core/floor';
 import { isCampFloor, type Pyramid } from '../src/game/core/game';
 import { reachable } from '../src/game/core/graph';
 import { resolveLanding } from '../src/game/core/traps';
@@ -143,8 +143,18 @@ export function checkTraps(label: string, p: Pyramid, i: number, f: Floor, below
   if (c && crow) {
     if (c.rank[f.stairs] !== -1) fail(`${label}: the stairs are in the sand order`);
     const solid = f.solid.slice();
-    for (const t of c.order) solid[t] = 1;
+    for (const t of c.order.slice(0, c.capLen)) solid[t] = 1;
     if (reachable(solid, size, f.stairs) * 10 < open * 4) fail(`${label}: with the sand in, the stairs keep under 40 % of the floor`);
+    // the escape sand (basement, plan 04) runs on over everything except the route to the false door
+    if (c.capLen > c.order.length) fail(`${label}: capLen beyond the order`);
+    if (f.exit >= 0) {
+      const all = f.solid.slice();
+      for (const t of c.order) all[t] = 1;
+      for (const t of f.traps) all[t.tile] = 1;
+      if (distancesFrom(all, size, f.stairs)[f.exitFront] < 0) fail(`${label}: the escape sand cuts the artifact from the false door`);
+      if (!c.protect) fail(`${label}: no protected route`);
+      else for (let t = 0; t < size * size; t++) if (c.protect[t] && c.rank[t] >= 0) fail(`${label}: the protected route is in the sand order`);
+    }
     for (let k = 1; k < c.order.length; k++) if (c.sdist[c.order[k]] < c.sdist[c.order[k - 1]]) fail(`${label}: sand order not monotone at ${k}`);
     c.order.forEach((t, k) => {
       if (c.rank[t] !== k) fail(`${label}: rank disagrees with order at ${k}`);

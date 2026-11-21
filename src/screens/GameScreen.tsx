@@ -48,6 +48,8 @@ const CAPTION_SECONDS = 1.6;
 const FALL_SECONDS = 0.25;
 /** Seconds a first-encounter hint stays up. */
 const HINT_SECONDS = 3;
+/** After the step into the false door, before the climb up the shaft. */
+const ESCAPE_STEP_SECONDS = 0.3;
 /** Floor-art chunk budgets: ms of rasterising per frame while walking, and under the overview. */
 const ART_BUDGET_PLAYING = 6;
 const ART_BUDGET_OVERVIEW = 8;
@@ -60,6 +62,9 @@ const HINTS: Record<HintId, string> = {
   sandfall: 'Sand trickles from the ceiling here.',
   trapdoor: 'A slab on pivots. It would drop you to the floor below.',
   collapse: 'The ceiling over the stairs gives way. Get away from the sand.',
+  guardian: 'A guardian in linen and gold. Your light shows you to it; it hears you walk. Slow steps are quiet.',
+  guardianWake: 'Stone grinds somewhere. Something is awake.',
+  escape: 'A false door has opened somewhere. The Scarab points the way, briefly.',
 };
 
 const DIR: Record<'right' | 'left' | 'down' | 'up', Direction> = { right: 0, left: 1, down: 2, up: 3 };
@@ -74,7 +79,8 @@ type Phase =
   | { name: 'camp' }
   | { name: 'paused' }
   | { name: 'burntOut' }
-  | { name: 'buried' };
+  | { name: 'buried' }
+  | { name: 'caught' };
 
 const campLabel = (floorIndex: number) => (floorIndex === 0 ? 'the top' : `camp · floor ${floorIndex + 1}`);
 
@@ -102,6 +108,16 @@ function captionFor(e: GameEvent): string | null {
       return 'Click.';
     case 'hit':
       return 'The stone knocks the light from your hand';
+    case 'guardianTouch':
+      return 'It smothers your light';
+    case 'guardianFollow':
+      return 'Footsteps on the stairs behind you';
+    case 'artifactTaken':
+      return 'The Golden Scarab is yours. The pyramid wakes.';
+    case 'exitOpened':
+      return 'Far off, stone grinds open. Air moves.';
+    case 'guardianHit':
+      return 'The stone falls on the guardian';
     default:
       return null;
   }
@@ -153,6 +169,8 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const [hud, setHud] = useState<HudText>(() => hudOf(game.current, null));
   const hudShown = useRef('');
   const hudDirty = useRef(true);
+  /** clock time at which the escape hint is due (3 s after the artifact is taken), or -1 */
+  const escapeHintAt = useRef(-1);
 
   useEffect(() => {
     reachFloor(pyramid.id, fromFloor);
@@ -171,6 +189,14 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const checkHints = useCallback(
     (g: GameState) => {
       if (caption.current && caption.current.until > clock.current) return;
+      if (escapeHintAt.current >= 0 && clock.current >= escapeHintAt.current) {
+        escapeHintAt.current = -1;
+        if (showHint('escape', g.floorIndex * 1000 + 700)) return;
+      }
+      const gd = g.guardian;
+      if (gd && gd.pos >= 0 && gd.mode !== 'arriving' && gd.mode !== 'gone' && g.light[gd.pos] >= 0.3 && !useProgress.getState().hints.guardian) {
+        if (showHint('guardian', g.floorIndex * 1000 + 600)) return;
+      }
       const { traps, size } = g.floor;
       for (let k = 0; k < traps.length; k++) {
         const t = traps[k];
@@ -216,13 +242,18 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
         // what happened: haptics and a short caption
         for (const e of g.events) {
           if (e.seq <= lastSeq) continue;
-          if (e.type === 'lowLight' || e.type === 'hit') haptic.warning();
-          else if (e.type === 'lit' || e.type === 'autoLight' || e.type === 'trapFired' || e.type === 'sandNear') haptic.bump();
+          // placeholder haptics: task 05 replaces them with sound and patterns
+          if (e.type === 'lowLight' || e.type === 'hit' || e.type === 'guardianTouch' || e.type === 'caught') haptic.warning();
+          else if (e.type === 'lit' || e.type === 'autoLight' || e.type === 'trapFired' || e.type === 'sandNear' || e.type === 'guardianNear') haptic.bump();
           else if (e.type === 'pickup' || e.type === 'refill' || e.type === 'plate') haptic.tap();
-          else if (e.type === 'quake') haptic.heavy();
+          else if (e.type === 'quake' || e.type === 'guardianWake' || e.type === 'exitOpened') haptic.heavy();
+          else if (e.type === 'artifactTaken') haptic.success();
+          if (e.type === 'guardianStep') continue;
           const text = captionFor(e);
           if (text) caption.current = { id: e.seq + g.floorIndex * 1000, text, until: clock.current + CAPTION_SECONDS };
           if (e.type === 'quake') showHint('collapse', g.floorIndex * 1000 + e.seq);
+          if (e.type === 'guardianWake') showHint('guardianWake', g.floorIndex * 1000 + e.seq);
+          if (e.type === 'artifactTaken') escapeHintAt.current = clock.current + HINT_SECONDS;
           hudDirty.current = true;
         }
         lastSeq = g.eventSeq;
@@ -308,7 +339,19 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
     } else if (status === 'buried') {
       haptic.warning();
       setPhase({ name: 'buried' });
+    } else if (status === 'caught') {
+      haptic.warning();
+      setPhase({ name: 'caught' });
     } else if (status === 'escaped' && !leaving.current) {
+      if (game.current.floor.exit >= 0) {
+        // the step into the doorway plays for a moment, then the climb up the shaft
+        const id = setTimeout(() => {
+          const g = game.current;
+          haptic.success();
+          setPhase({ name: 'overview', from: g.floorIndex, to: g.floorIndex, kind: 'escape' });
+        }, reducedMotion ? 0 : ESCAPE_STEP_SECONDS * 1000);
+        return () => clearTimeout(id);
+      }
       leaving.current = true;
       haptic.success();
       takeArtifact(pyramid.id);
@@ -352,6 +395,15 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
   const overviewDone = useCallback(() => {
     const p = phaseRef.current;
     if (p.name !== 'overview') return;
+    if (p.kind === 'escape') {
+      if (leaving.current) return;
+      leaving.current = true;
+      const g = game.current;
+      const out = g.escape?.t ?? 0;
+      takeArtifact(pyramid.id, { escape: out, touches: g.guardian?.touches ?? 0 });
+      router.replace({ pathname: '/artifact/[id]', params: { id: pyramid.id, out: String(out) } });
+      return;
+    }
     if (p.kind === 'descend' && isCampFloor(pyramid, p.to)) {
       reachCamp(pyramid.id, p.to);
       setPhase({ name: 'camp' });
@@ -553,6 +605,16 @@ export function GameScreen({ pyramid, fromFloor }: { pyramid: PyramidInfo; fromF
       {phase.name === 'buried' && (
         <Panel eyebrow={floorText} title="Sealed in by sand">
           <PanelText>The sand has closed every way down. You dig back to {campLabel(checkpoint)}.</PanelText>
+          <PanelActions>
+            <Button variant="primary" label={checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={retry} />
+            <Button variant="ghost" label="Leave to the map" onPress={leaveToMap} />
+          </PanelActions>
+        </Panel>
+      )}
+
+      {phase.name === 'caught' && (
+        <Panel eyebrow={floorText} title="Taken in the dark">
+          <PanelText>With your light gone, the guardian found you. You come to at {campLabel(checkpoint)}.</PanelText>
           <PanelActions>
             <Button variant="primary" label={checkpoint === 0 ? 'Back to the top' : `Back to camp · floor ${checkpoint + 1}`} onPress={retry} />
             <Button variant="ghost" label="Leave to the map" onPress={leaveToMap} />

@@ -23,8 +23,10 @@ import {
   type Spot,
 } from './floor';
 import type { Pyramid } from './game';
-import { buildSandOrder } from './collapse';
+import { buildSandOrder, extendSandOrder } from './collapse';
 import { placeBraziers, placeLights } from './placeLights';
+import { placeExit } from './escape';
+import { placeGuardian } from './guardian';
 import { placeTraps } from './traps';
 import { createRng, shuffle } from './rng';
 
@@ -495,8 +497,27 @@ export function addFeatures(layout: Layout, spec: GenSpec, below: Layout | null)
   void _a;
   void _s;
   const placed = placeTraps({ layout, items: lights.items, fixtures, spec, below, rng: createRng(spec.seed ^ 0x2545f491) });
-  const collapse = buildSandOrder(layout, profile.collapse?.(spec.floorIndex) ?? null);
-  return { ...rest, items: lights.items, fixtures, traps: placed.traps, trapAt: placed.trapAt, eligiblePorts: placed.eligiblePorts, collapse };
+  const sandRow = profile.collapse?.(spec.floorIndex) ?? null;
+  let collapse = buildSandOrder(layout, sandRow);
+  const door = profile.falseDoor && spec.basement ? placeExit({ layout, traps: placed.traps, fixtures, items: lights.items, collapse }) : { exit: -1, exitFront: -1, protect: null };
+  const escapeCap = spec.basement ? (profile.escapeCap?.(spec.floorIndex) ?? null) : null;
+  if (collapse && sandRow && door.protect && escapeCap) collapse = extendSandOrder(layout, sandRow, collapse, escapeCap, door.protect);
+  const row = profile.guardian?.(spec.floorIndex) ?? null;
+  const guardian = row
+    ? placeGuardian({ layout, row, items: lights.items, fixtures, traps: placed.traps, collapse, exit: door.exit, exitFront: door.exitFront, basement: spec.basement })
+    : null;
+  return {
+    ...rest,
+    items: lights.items,
+    fixtures,
+    traps: placed.traps,
+    trapAt: placed.trapAt,
+    eligiblePorts: placed.eligiblePorts,
+    collapse,
+    exit: door.exit,
+    exitFront: door.exitFront,
+    guardian,
+  };
 }
 
 export function generateFloor(spec: GenSpec, below: Layout | null = null): Floor {

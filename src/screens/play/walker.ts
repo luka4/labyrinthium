@@ -31,9 +31,12 @@ export function createWalker(onBump: () => void): Walker {
   /** the last press has not moved yet: a wall bump is feedback only for it */
   let fresh = false;
 
-  /** armed traps and covered sand are never walked into by auto-walk (a swipe still can) */
+  /** armed traps, covered sand and a dormant guardian are never walked into by auto-walk (a swipe still can) */
   const avoid = (s: GameState) => (tile: number) => {
     const k = s.floor.trapAt[tile];
+    const g = s.guardian;
+    // a dormant guardian is a statue in the way: auto-walk stops short of it
+    if (g && (g.mode === 'dormant' || g.mode === 'waking') && g.pos === tile) return true;
     return (k >= 0 && s.trapPhase[k] === 0) || sandLevel(s, tile) >= COVER;
   };
 

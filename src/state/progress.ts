@@ -10,7 +10,16 @@ import { PYRAMIDS, SEALS, isPyramidId, type PyramidId } from '../game/core/pyram
  * leaving or losing the torch resumes from the last camp, as in the design doc.
  */
 /** One-time teaching captions (plan 03): shown the first time a trap kind is lit. */
-export type HintId = 'plate' | 'block' | 'portcullis' | 'sandfall' | 'trapdoor' | 'collapse';
+export type HintId = 'plate' | 'block' | 'portcullis' | 'sandfall' | 'trapdoor' | 'collapse' | 'guardian' | 'guardianWake' | 'escape';
+
+/** What one pyramid's escapes add up to (plan 04): the count, the fastest, and how many were clean. Task 05 builds stars on it. */
+export type EscapeRecord = {
+  escapes: number;
+  /** seconds from lifting the artifact to the door, best run; null if never recorded */
+  bestEscape: number | null;
+  /** escapes in which the guardian never touched you */
+  untouched: number;
+};
 
 type ProgressData = {
   /** artifacts taken */
@@ -26,6 +35,8 @@ type ProgressData = {
   endingSeen: boolean;
   /** captions already shown */
   hints: Partial<Record<HintId, true>>;
+  /** escapes per pyramid (plan 04) */
+  records: Partial<Record<PyramidId, EscapeRecord>>;
 };
 
 type ProgressActions = {
@@ -35,7 +46,8 @@ type ProgressActions = {
   reachCamp: (id: PyramidId, floorIndex: number) => void;
   /** development only: pretend a camp floor was reached (any floor index is stored; the load sanitises it) */
   devReachCamp: (id: PyramidId, floorIndex: number) => void;
-  takeArtifact: (id: PyramidId) => void;
+  /** the artifact was taken and you got out; `result` = seconds from the artifact to the door and guardian touches */
+  takeArtifact: (id: PyramidId, result?: { escape: number; touches: number }) => void;
   markBlackUnlockSeen: () => void;
   markEndingSeen: () => void;
   markHint: (id: HintId) => void;
@@ -52,6 +64,7 @@ const EMPTY: ProgressData = {
   blackUnlockSeen: false,
   endingSeen: false,
   hints: {},
+  records: {},
 };
 
 export const useProgress = create<ProgressData & ProgressActions>()(
@@ -67,14 +80,26 @@ export const useProgress = create<ProgressData & ProgressActions>()(
           camp: { ...s.camp, [id]: floorIndex },
           deepest: { ...s.deepest, [id]: Math.max(floorIndex, s.deepest[id] ?? 0) },
         })),
-      takeArtifact: (id) =>
+      takeArtifact: (id, result) =>
         set((s) => {
           const camp = { ...s.camp };
           delete camp[id];
+          const prev = s.records[id];
+          const records = result
+            ? {
+                ...s.records,
+                [id]: {
+                  escapes: (prev?.escapes ?? 0) + 1,
+                  bestEscape: prev?.bestEscape == null ? result.escape : Math.min(prev.bestEscape, result.escape),
+                  untouched: (prev?.untouched ?? 0) + (result.touches === 0 ? 1 : 0),
+                },
+              }
+            : s.records;
           return {
             artifacts: { ...s.artifacts, [id]: true },
             completions: { ...s.completions, [id]: (s.completions[id] ?? 0) + 1 },
             camp,
+            records,
           };
         }),
       markBlackUnlockSeen: () => set({ blackUnlockSeen: true }),
@@ -90,7 +115,7 @@ export const useProgress = create<ProgressData & ProgressActions>()(
     }),
     {
       name: 'labyrinthium.progress',
-      version: 3,
+      version: 4,
       /**
        * v2: Egypt has 10 floors and camps follow the floor number (every 5th), so saved camp
        * indices no longer match: camps reset (artifacts and records stay), `deepest` is clamped.
@@ -122,10 +147,14 @@ export const useProgress = create<ProgressData & ProgressActions>()(
           data.deepest = deepest;
           data.hints = {};
         }
+        if (version < 4) {
+          // v4: escape records per pyramid
+          data.records = {};
+        }
         return { ...EMPTY, ...data };
       },
       storage: createJSONStorage(() => AsyncStorage),
-      partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen, hints }) => ({
+      partialize: ({ artifacts, camp, deepest, completions, blackUnlockSeen, endingSeen, hints, records }) => ({
         artifacts,
         camp,
         deepest,
@@ -133,6 +162,7 @@ export const useProgress = create<ProgressData & ProgressActions>()(
         blackUnlockSeen,
         endingSeen,
         hints,
+        records,
       }),
     },
   ),

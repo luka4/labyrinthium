@@ -12,13 +12,19 @@ import { colors, space, type } from '../../ui/theme';
 
 const REVEAL_MS = 1400;
 
+const mmss = (sec: number) => {
+  const n = Math.max(0, Math.round(sec));
+  return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
+};
+
 /** The basement: the artifact rises out of the dark. */
 export default function ArtifactScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, out } = useLocalSearchParams<{ id: string; out?: string }>();
   const { width, height } = useWindowDimensions();
   const reduced = useReducedMotion();
   const time = useTicker(30);
   const artifacts = useProgress((s) => s.artifacts);
+  const record = useProgress((s) => (isPyramidId(id) ? s.records[id] : undefined));
 
   if (!isPyramidId(id)) return <Redirect href="/map" />;
   const p = PYRAMIDS[id];
@@ -55,6 +61,11 @@ export default function ArtifactScreen() {
         <Text style={[type.body, styles.center]}>You took it from the dark and found the way out.</Text>
         <Text style={[type.body, styles.center, { color: colors.muted }]}>{p.power}</Text>
         <Text style={[type.caption, styles.center, { color: colors.gold }]}>{line}</Text>
+        {record?.bestEscape != null && (
+          <Text style={[type.caption, styles.center, { color: colors.muted }]}>
+            Out in {mmss(Number.isFinite(Number(out)) && out ? Number(out) : record.bestEscape)} · best {mmss(record.bestEscape)}
+          </Text>
+        )}
       </View>
       <View style={styles.actions}>
         <Button variant="primary" label={heart ? 'Go on' : 'Back to the map'} onPress={next} disabled={reveal < 1} />

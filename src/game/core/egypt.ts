@@ -4,6 +4,19 @@
  * Rows 1-9 are frozen (their floors are bit-identical to plan 01); row 10 keeps its numbers but is
  * a normal floor now. Rows 11-25 and all trap/collapse numbers may be tuned.
  */
+export type GuardianRow = {
+  /** seconds of burning time before it wakes by itself (the sentinel: Infinity, only the Scarab wakes it) */
+  wake: number;
+  /** seconds per tile: walking its rounds, searching a noise, hunting you */
+  patrol: number;
+  search: number;
+  hunt: number;
+  /** a guardian hunting you on the floor above comes down after you */
+  follow: boolean;
+  /** the basement: stands beside the burial chamber's door until the Scarab is lifted */
+  sentinel: boolean;
+};
+
 export type EgyptRow = {
   sites: number;
   halls: number;
@@ -19,7 +32,14 @@ export type EgyptRow = {
   collapse: { delay: number; rate: number; cap: number } | null;
   /** play time aimed at, seconds */
   target: number;
+  /** the tomb guardian of this floor (plan 04), or null */
+  guardian: GuardianRow | null;
+  /** basement: % of open tiles the sand may reach once the Scarab is taken (plan 04), else null */
+  escapeCap: number | null;
 };
+
+/** Seconds from taking the Scarab to stepping into the false door that the bot report aims at. */
+export const ESCAPE_TARGET = 30;
 
 const T = (block: number, portcullis: number, sandfall: number, trapdoor: number) => ({ block, portcullis, sandfall, trapdoor });
 const C = (delay: number, rate: number, cap: number) => ({ delay, rate, cap });
@@ -33,7 +53,11 @@ const R = (
   traps: EgyptRow['traps'],
   collapse: EgyptRow['collapse'],
   target: number,
-): EgyptRow => ({ sites, halls, galleries, loops, secPerTile, sconceCap, traps, collapse, target });
+  guardian: GuardianRow | null = null,
+  escapeCap: number | null = null,
+): EgyptRow => ({ sites, halls, galleries, loops, secPerTile, sconceCap, traps, collapse, target, guardian, escapeCap });
+
+const G = (wake: number, patrol: number, search: number, hunt: number, follow = false, sentinel = false): GuardianRow => ({ wake, patrol, search, hunt, follow, sentinel });
 
 const none = T(0, 0, 0, 0);
 
@@ -55,15 +79,15 @@ export const EGYPT_ROWS: readonly EgyptRow[] = [
   R(10, 3, 2, 0.141, 0.125, 12, T(3, 2, 1, 1), C(22, 2.0, 35), 120),
   R(10, 3, 2, 0.146, 0.12, 12, T(4, 2, 2, 0), C(22, 2.0, 36), 130),
   R(10, 3, 2, 0.15, 0.12, 12, T(4, 2, 2, 1), C(18, 2.3, 42), 145),
-  R(11, 4, 2, 0.154, 0.115, 12, T(4, 3, 1, 1), C(22, 2.0, 38), 155),
-  R(11, 4, 2, 0.159, 0.115, 12, T(4, 3, 2, 0), C(20, 2.1, 40), 170),
-  R(11, 4, 2, 0.163, 0.11, 12, T(5, 3, 1, 1), C(18, 2.2, 42), 180),
-  R(12, 4, 3, 0.167, 0.11, 12, T(5, 3, 1, 0), C(17, 2.3, 44), 190),
-  R(12, 4, 3, 0.171, 0.105, 12, T(5, 3, 2, 1), C(16, 2.4, 46), 205),
-  R(12, 5, 3, 0.176, 0.105, 12, T(5, 4, 2, 0), C(15, 2.5, 48), 215),
-  R(13, 5, 3, 0.18, 0.1, 12, T(6, 4, 2, 0), C(14, 2.6, 50), 230),
+  R(11, 4, 2, 0.154, 0.115, 12, T(4, 3, 1, 1), C(22, 2.0, 38), 165, G(45, 0.65, 0.45, 0.28)),
+  R(11, 4, 2, 0.159, 0.115, 12, T(4, 3, 2, 0), C(20, 2.1, 40), 180, G(40, 0.62, 0.44, 0.28)),
+  R(11, 4, 2, 0.163, 0.11, 12, T(5, 3, 1, 1), C(18, 2.2, 42), 190, G(35, 0.62, 0.42, 0.27)),
+  R(12, 4, 3, 0.167, 0.11, 12, T(5, 3, 1, 0), C(17, 2.3, 44), 200, G(30, 0.6, 0.42, 0.27)),
+  R(12, 4, 3, 0.171, 0.105, 12, T(5, 3, 2, 1), C(16, 2.4, 46), 215, G(28, 0.6, 0.4, 0.26, true)),
+  R(12, 5, 3, 0.176, 0.105, 12, T(5, 4, 2, 0), C(15, 2.5, 48), 225, G(25, 0.58, 0.4, 0.26, true)),
+  R(13, 5, 3, 0.18, 0.1, 12, T(6, 4, 2, 0), C(14, 2.6, 50), 240, G(22, 0.58, 0.38, 0.25, true)),
   // basement: smaller than floor 24; the escape (task 04) adds to its play time
-  R(12, 3, 1, 0.15, 0.11, 12, T(4, 3, 2, 0), C(14, 2.4, 42), 240),
+  R(12, 3, 1, 0.15, 0.11, 12, T(4, 3, 2, 0), C(14, 2.4, 42), 240, G(Infinity, 0.55, 0.36, 0.23, false, true), 60),
 ];
 
 /** 0-based camp floors (1-based 5, 10, 14, 17, 20, 22, 24, 25), placed by play time. */

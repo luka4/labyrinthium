@@ -1,5 +1,5 @@
 import type { Lattice, Room, RoomKind, Spot } from './floor';
-import { EGYPT_ROWS, type EgyptRow } from './egypt';
+import { EGYPT_ROWS, type EgyptRow, type GuardianRow } from './egypt';
 import type { Rng } from './rng';
 
 /**
@@ -32,6 +32,12 @@ export type ArchProfile = {
   traps?: (floorIndex: number) => EgyptRow['traps'];
   /** the collapse of the floor above (collapse.ts); absent or null = none */
   collapse?: (floorIndex: number) => EgyptRow['collapse'];
+  /** the tomb guardian of a floor (plan 04); absent or null = none */
+  guardian?: (floorIndex: number) => GuardianRow | null;
+  /** basement: the sand's cap % once the artifact is taken; absent or null = no escape sand */
+  escapeCap?: (floorIndex: number) => number | null;
+  /** the basement has a false door that opens onto the escape shaft */
+  falseDoor: boolean;
   /** weights for dead-end rooms */
   leafRooms: Partial<Record<RoomKind, number>>;
   /** chance a site with 3+ ports becomes a chamber */
@@ -61,6 +67,9 @@ const EGYPT: ArchProfile = {
   sconceCap: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].sconceCap,
   traps: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].traps,
   collapse: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].collapse,
+  guardian: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].guardian,
+  escapeCap: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].escapeCap,
+  falseDoor: true,
   halls: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].halls,
   galleries: (i) => EGYPT_ROWS[Math.min(i, EGYPT_ROWS.length - 1)].galleries,
   leafRooms: { chamber: 5, magazines: 3, shrine: 2 },
@@ -84,6 +93,9 @@ const PROFILES: Record<ArchProfileId, ArchProfile> = {
     sconceCap: () => 8,
     traps: undefined,
     collapse: undefined,
+    guardian: undefined,
+    escapeCap: undefined,
+    falseDoor: false,
   },
   black: {
     ...EGYPT,
@@ -97,6 +109,9 @@ const PROFILES: Record<ArchProfileId, ArchProfile> = {
     sconceCap: () => 8,
     traps: undefined,
     collapse: undefined,
+    guardian: undefined,
+    escapeCap: undefined,
+    falseDoor: false,
   },
 };
 

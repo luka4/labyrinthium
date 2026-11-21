@@ -11,6 +11,7 @@ import { profileFor } from '../src/game/core/architecture';
 import { DIRS, TILE, distancesFrom, type Floor, type RoomKind, type TrapKind } from '../src/game/core/floor';
 import { addFeatures, floorFor, generateFloor, generateLayout, layoutFor, specFor } from '../src/game/core/generate';
 import { CARRY } from '../src/game/core/lights';
+import { checkGuardianFloor, placementHash, runGuardianChecks } from './check-guardian';
 import { runLightChecks } from './check-light-rules';
 import { KINDS, checkTraps, featHash, type TrapStats } from './check-traps';
 import { runTrapRules } from './check-trap-rules';
@@ -39,6 +40,14 @@ const ITEM_GLYPH: Record<string, string> = { smallTorch: 't', torch: 'T', bigTor
 /** block X, portcullis plate P and its port =, sandfall $, trapdoor v (b stays the bench, s the sconce) */
 const TRAP_GLYPH: Record<TrapKind, string> = { block: 'X', portcullis: 'P', sandfall: '$', trapdoor: 'v' };
 
+/** the guardian's lair G (sentinel post S), its waypoints w and the false door E (--ascii) */
+function markOf(f: Floor, i: number): string | null {
+  if (f.guardian && i === f.guardian.lair) return f.guardian.sentinel ? 'S' : 'G';
+  if (f.guardian?.route.includes(i)) return 'w';
+  if (i === f.exit) return 'E';
+  return null;
+}
+
 /** --sand: the sand rank in deciles 0-9 over the ranked part, '.' elsewhere */
 function sandDigit(f: Floor, i: number): string | null {
   if (!args.includes('--sand') || !f.collapse) return null;
@@ -57,10 +66,13 @@ function ascii(f: Floor): string {
       const tk = f.trapAt[i] >= 0 ? f.traps[f.trapAt[i]] : null;
       const port = f.traps.some((t) => t.kind === 'portcullis' && t.target === i);
       const sand = sandDigit ? sandDigit(f, i) : null;
+      const mark = markOf(f, i);
       row +=
         i === f.start
           ? '@'
-          : tk
+          : mark
+            ? mark
+            : tk
             ? TRAP_GLYPH[tk.kind]
             : port
               ? '='
@@ -278,6 +290,13 @@ for (const id of Object.keys(PYRAMIDS) as PyramidId[]) {
     snapshot[`${id}:${i}:feat`] = fh;
     if (old[`${id}:${i}:feat`] && old[`${id}:${i}:feat`] !== fh && !args.includes('--update')) fail(`${label}: features snapshot changed (npm run check:floors -- --update)`);
     checkTraps(label, p, i, f, i + 1 < p.floorCount ? floorFor(p, i + 1) : null, true, { fail, warn }, id === 'egypt' ? fixedStats : undefined);
+    checkGuardianFloor(label, p, i, f, { fail, warn });
+    if (id === 'egypt' && i >= 17) {
+      const gh = placementHash(f);
+      if (placementHash(again) !== gh) fail(`${label}: guardian placement not deterministic`);
+      snapshot[`${id}:${i}:g`] = gh;
+      if (old[`${id}:${i}:g`] && old[`${id}:${i}:g`] !== gh && !args.includes('--update')) fail(`${label}: guardian snapshot changed (npm run check:floors -- --update)`);
+    }
     if (old[`${id}:${i}`] && old[`${id}:${i}`] !== h && !args.includes('--update')) fail(`${label}: snapshot changed ${old[`${id}:${i}`]} -> ${h} (npm run check:floors -- --update)`);
     const m = check(label, f, i === p.floorCount - 1, i, isCampFloor(p, i));
     const kinds = Object.entries(m.kinds)
@@ -326,6 +345,7 @@ for (let seed = 1; seed <= FUZZ_EARLY && failures <= 40; seed++) {
     const f = floors[i];
     const label = `egypt seed ${seed} floor ${i + 1}`;
     check(label, f, i === egypt.floorCount - 1, i, isCampFloor(egypt, i));
+    checkGuardianFloor(label, pyr, i, f, { fail, warn });
     if (checkTraps(label, pyr, i, f, i + 1 < layouts.length ? floors[i + 1] : null, false, { fail, warn }, fuzzStats[i]).lowered) loweredCaps++;
     fuzzFloors++;
     if (i < 3 && f.loops) fail(`${label}: loops on an early floor`);
@@ -348,6 +368,7 @@ const fixedShort = KINDS.filter((k) => fixedStats[k].placed < fixedStats[k].targ
 console.log(`fixed seed traps placed/target: ${KINDS.map((k) => `${k} ${fixedStats[k].placed}/${fixedStats[k].target}`).join(', ')}${fixedShort.length ? ' (short: ' + fixedShort.join(', ') + ')' : ''}`);
 
 runTrapRules({ fail, warn });
+runGuardianChecks({ fail, warn });
 runLightChecks({ fail, warn, snapshot, old, update: args.includes('--update') });
 
 // camps
